@@ -692,8 +692,13 @@ async function notifyControllers(type: string, data: any) {
   }
 }
 
-// Initialize the notification polling - called once when the module loads
-(function initialize() {
+// Flag to track if the module has been initialized
+let moduleInitialized = false;
+
+// Initialize the notification polling - called on first request
+function initializeModule() {
+  if (moduleInitialized) return; // Only initialize once
+  
   // Start polling for controller change notifications
   startNotificationPolling();
 
@@ -702,11 +707,15 @@ async function notifyControllers(type: string, data: any) {
     stopNotificationPolling();
   });
 
+  moduleInitialized = true;
   console.log("[SIGNAL] Module initialized, notification polling started");
-})();
+}
 
 export const handler: Handlers = {
   GET: async (req) => {
+    // Initialize the module on first request
+    initializeModule();
+    
     const url = new URL(req.url);
     const upgrade = req.headers.get("upgrade") || "";
 
@@ -933,7 +942,9 @@ export const handler: Handlers = {
                 // Try to get the current active controller from new endpoint via fetch
                 // Use absolute URL to avoid path resolution issues
                 const baseUrl = new URL(requestUrl).origin;
-                const response = await fetch(`${baseUrl}/api/controller/status`);
+                const response = await fetch(
+                  `${baseUrl}/api/controller/status`,
+                );
                 if (response.ok) {
                   const data = await response.json();
 
