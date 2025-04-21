@@ -244,6 +244,9 @@ export default function WebRTC() {
 
       // Report audio status to controller
       sendAudioStatus();
+
+      // Request global parameters from controller
+      requestGlobalParameters();
     };
 
     channel.onclose = () => {
@@ -277,16 +280,16 @@ export default function WebRTC() {
     // Handle synth parameter updates
     if (data.type === "synth_param") {
       handleSynthParamUpdate(data.param, data.value);
-    } 
-    // Handle ping requests
+    } // Handle global parameter bundle updates
+    else if (data.type === "global_params_bundle") {
+      handleGlobalParamsBundle(data.params, data.version);
+    } // Handle ping requests
     else if (data.type === "ping") {
       sendPong(data.timestamp);
-    } 
-    // Handle verification ping responses (pong)
+    } // Handle verification ping responses (pong)
     else if (data.type === "verification_pong") {
       handleVerificationPong(data);
-    }
-    // Handle verification ping requests (respond with pong)
+    } // Handle verification ping requests (respond with pong)
     else if (data.type === "verification_ping") {
       // Respond with a verification pong
       if (dataChannel.value && dataChannel.value.readyState === "open") {
@@ -295,11 +298,10 @@ export default function WebRTC() {
           pingId: data.pingId,
           timestamp: Date.now(),
           originalTimestamp: data.timestamp,
-          respondingClientId: id.value
+          respondingClientId: id.value,
         }));
       }
-    }
-    // Handle regular messages
+    } // Handle regular messages
     else {
       addLog(`Received: ${JSON.stringify(data)}`);
     }
@@ -314,7 +316,7 @@ export default function WebRTC() {
             // Initialize audio if not already done
             initAudio();
           }
-          
+
           // Just control gain to enable/disable sound
           if (value) {
             // Unmute by setting gain to normal value
@@ -348,6 +350,40 @@ export default function WebRTC() {
           oscillator.detune.value = value;
         }
         break;
+    }
+  };
+
+  // Handle global parameter bundle updates
+  const handleGlobalParamsBundle = (
+    params: Record<string, any>,
+    version: number,
+  ) => {
+    // Log receipt of parameter bundle
+    addLog(
+      `Received global params bundle with ${
+        Object.keys(params).length
+      } parameters (v${version})`,
+    );
+
+    // Initialize audio if needed and not already done
+    if (!audioEnabled.value && audioContext === null) {
+      initAudio();
+    }
+
+    // Process each parameter in the bundle
+    Object.entries(params).forEach(([param, value]) => {
+      // Reuse existing parameter handler for individual updates
+      handleSynthParamUpdate(param, value);
+    });
+
+    // Send acknowledgement back to controller
+    if (dataChannel.value && dataChannel.value.readyState === "open") {
+      dataChannel.value.send(JSON.stringify({
+        type: "params_bundle_ack",
+        timestamp: Date.now(),
+        version: version,
+        clientId: id.value,
+      }));
     }
   };
 
@@ -660,30 +696,30 @@ export default function WebRTC() {
   // Track verification pings for connection health
   const verificationPings = new Map<string, number>();
   const PING_TIMEOUT_MS = 5000; // 5 seconds timeout for ping responses
-  
+
   // Send a verification ping to the controller
   const sendVerificationPing = () => {
     if (!dataChannel.value || dataChannel.value.readyState !== "open") {
       return false;
     }
-    
+
     try {
       const pingId = crypto.randomUUID().substring(0, 8);
       const now = Date.now();
-      
+
       // Store this ping id and timestamp
       verificationPings.set(pingId, now);
-      
+
       // Send the verification ping
       dataChannel.value.send(JSON.stringify({
         type: "verification_ping",
         pingId: pingId,
         timestamp: now,
-        clientId: id.value
+        clientId: id.value,
       }));
-      
+
       addLog(`Sent verification ping ${pingId}`);
-      
+
       // Set a timeout to check if we got a response
       setTimeout(() => {
         if (verificationPings.has(pingId)) {
@@ -691,8 +727,8 @@ export default function WebRTC() {
           console.log(`[SYNTH] No response to verification ping ${pingId}`);
           verificationPings.delete(pingId);
           connectionHealthy.value = false;
-          
-          // If we haven't gotten responses to verification pings, 
+
+          // If we haven't gotten responses to verification pings,
           // that's a strong indicator we need to reconnect
           if (connected.value && activeController.value) {
             addLog("Connection verification failed - attempting reconnection");
@@ -700,26 +736,26 @@ export default function WebRTC() {
           }
         }
       }, PING_TIMEOUT_MS);
-      
+
       return true;
     } catch (error) {
       console.error("[SYNTH] Error sending verification ping:", error);
       return false;
     }
   };
-  
+
   // Handle verification pong response
   const handleVerificationPong = (data: any) => {
     const { pingId, timestamp } = data;
-    
+
     if (verificationPings.has(pingId)) {
       // Calculate round-trip time
       const rtt = Date.now() - verificationPings.get(pingId);
       addLog(`Received verification pong for ${pingId} (RTT: ${rtt}ms)`);
-      
+
       // Remove this ping from tracking
       verificationPings.delete(pingId);
-      
+
       // Update connection health - this is a strong positive signal
       connectionHealthy.value = true;
       lastMessageReceivedTime.value = Date.now();
@@ -754,8 +790,7 @@ export default function WebRTC() {
       // Send a verification ping every other heartbeat interval
       if (now % 20000 < 10000) {
         sendVerificationPing();
-      } 
-      // On alternate intervals, send a regular heartbeat
+      } // On alternate intervals, send a regular heartbeat
       else if (dataChannel.value && dataChannel.value.readyState === "open") {
         try {
           dataChannel.value.send(JSON.stringify({
@@ -783,12 +818,12 @@ export default function WebRTC() {
       audioContext.resume();
       audioState.value = audioContext.state;
     }
-    
+
     // Unmute gain to hear sound
     if (gainNode) {
       gainNode.gain.value = 0.1; // Default volume
     }
-    
+
     // Send audio status to controller
     sendAudioStatus();
   };
@@ -799,7 +834,7 @@ export default function WebRTC() {
       // Just mute the gain without stopping oscillator
       gainNode.gain.value = 0;
       addLog("Audio muted (oscillator still running)");
-      
+
       // Send audio status to controller
       sendAudioStatus();
     }
@@ -812,33 +847,35 @@ export default function WebRTC() {
       if (!audioContext) {
         audioContext =
           new (window.AudioContext || (window as any).webkitAudioContext)();
-        
+
         // Create the gain node (initially muted)
         gainNode = audioContext.createGain();
         gainNode.gain.value = 0; // Start muted
         gainNode.connect(audioContext.destination);
-        
+
         // Create and start a single oscillator that runs continuously
         oscillator = audioContext.createOscillator();
         oscillator.type = "sine"; // Default waveform
         oscillator.frequency.value = 440; // Default frequency (A4)
         oscillator.connect(gainNode);
-        
+
         // Start the oscillator immediately and let it run continuously
         // We'll control sound with the gain node
         oscillator.start();
-        
+
         audioState.value = audioContext.state;
-        addLog(`Audio initialized and oscillator started (${audioState.value})`);
+        addLog(
+          `Audio initialized and oscillator started (${audioState.value})`,
+        );
       }
-      
+
       // Resume audio context if needed
       if (audioContext.state === "suspended") {
         audioContext.resume();
         audioState.value = audioContext.state;
         addLog(`Audio context resumed (${audioState.value})`);
       }
-      
+
       audioEnabled.value = true;
 
       // Hide the initial audio button after initialization
@@ -879,6 +916,23 @@ export default function WebRTC() {
         }));
       } catch (error) {
         console.error("[SYNTH] Error sending audio status:", error);
+      }
+    }
+  };
+
+  // Request global parameters from controller
+  const requestGlobalParameters = () => {
+    if (dataChannel.value && dataChannel.value.readyState === "open") {
+      try {
+        console.log("[SYNTH] Requesting global parameters from controller");
+        dataChannel.value.send(JSON.stringify({
+          type: "request_global_params",
+          clientId: id.value,
+          timestamp: Date.now(),
+        }));
+        addLog("Requested global parameters from controller");
+      } catch (error) {
+        console.error("[SYNTH] Error requesting global parameters:", error);
       }
     }
   };
@@ -1032,21 +1086,23 @@ export default function WebRTC() {
           {!showAudioButton.value && (
             <div class="audio-status">
               <p>
-                Audio Context: {audioContext ? (
-                  <span class={audioState.value === "running" ? "audio-enabled" : "audio-suspended"}>
-                    {audioState.value}
-                  </span>
-                ) : (
-                  <span class="audio-disabled">Not initialized</span>
-                )}
+                Audio Context: {audioContext
+                  ? (
+                    <span
+                      class={audioState.value === "running"
+                        ? "audio-enabled"
+                        : "audio-suspended"}
+                    >
+                      {audioState.value}
+                    </span>
+                  )
+                  : <span class="audio-disabled">Not initialized</span>}
               </p>
-              
+
               <p>
-                Note: {gainNode && gainNode.gain.value > 0 ? (
-                  <span class="audio-enabled">Playing</span>
-                ) : (
-                  <span class="audio-note-off">Silent</span>
-                )}
+                Note: {gainNode && gainNode.gain.value > 0
+                  ? <span class="audio-enabled">Playing</span>
+                  : <span class="audio-note-off">Silent</span>}
               </p>
 
               <div class="audio-buttons">

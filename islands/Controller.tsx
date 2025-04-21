@@ -790,10 +790,144 @@ export default function Controller({ user }: ControllerProps) {
     }
   };
 
-  // Optimized global parameter update function
+  // Track parameter versions to ensure freshness
+  const paramVersions = useSignal<{ [key: string]: number }>({});
+
+  // Persistent storage for global parameters (via server)
+  const saveGlobalParamsToServer = async () => {
+    try {
+      // Only controllers should save global params
+      if (idType.value !== "controller" || !controlActive.value) return;
+
+      const resp = await fetch("/api/controller/params", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          controllerId: id.value,
+          params: globalSynthParams.value,
+          version: Date.now(),
+        }),
+      });
+
+      if (!resp.ok) {
+        console.error("[CONTROLLER] Failed to save global parameters");
+      } else {
+        console.log("[CONTROLLER] Global parameters saved to server");
+      }
+    } catch (error) {
+      console.error("[CONTROLLER] Error saving global parameters:", error);
+    }
+  };
+
+  // Load global params from server (for controller continuity)
+  const loadGlobalParamsFromServer = async () => {
+    try {
+      const resp = await fetch("/api/controller/params");
+
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.params) {
+          console.log(
+            "[CONTROLLER] Loaded global params from server:",
+            data.params,
+          );
+          globalSynthParams.value = {
+            ...globalSynthParams.value,
+            ...data.params,
+          };
+
+          // Update version tracking
+          if (data.version) {
+            Object.keys(data.params).forEach((param) => {
+              paramVersions.value[param] = data.version;
+            });
+          }
+
+          return true;
+        }
+      }
+    } catch (error) {
+      console.error("[CONTROLLER] Error loading global parameters:", error);
+    }
+
+    return false;
+  };
+
+  // Send complete global parameter state to a client
+  const sendGlobalParamsToClient = (clientId: string) => {
+    const connection = connections.value.get(clientId);
+    if (
+      !connection?.dataChannel || connection.dataChannel.readyState !== "open"
+    ) {
+      console.log(
+        `[CONTROLLER] Cannot send global params to ${clientId} - data channel not ready`,
+      );
+      return false;
+    }
+
+    try {
+      // Create a versioned parameter bundle with all global parameters
+      const paramBundle = {
+        type: "global_params_bundle",
+        params: { ...globalSynthParams.value },
+        version: Date.now(),
+        controllerId: id.value,
+      };
+
+      // Send the complete bundle
+      connection.dataChannel.send(JSON.stringify(paramBundle));
+      console.log(`[CONTROLLER] Sent global params bundle to ${clientId}`);
+      addLog(`Sent global parameter bundle to ${clientId}`);
+
+      return true;
+    } catch (error) {
+      console.error(
+        `[CONTROLLER] Error sending global params to ${clientId}:`,
+        error,
+      );
+      return false;
+    }
+  };
+
+  // Handle global parameter request from client
+  const handleGlobalParamRequest = (clientId: string) => {
+    console.log(`[CONTROLLER] Client ${clientId} requested global parameters`);
+    addLog(`Client ${clientId} requested global parameters - sending bundle`);
+
+    // Send the complete parameter bundle
+    return sendGlobalParamsToClient(clientId);
+  };
+
+  // Handle parameter acknowledgement from client
+  const handleParamAck = (clientId: string, data: any) => {
+    const { param, version, received } = data;
+
+    if (received) {
+      console.log(
+        `[CONTROLLER] Client ${clientId} acknowledged param ${param} (v${version})`,
+      );
+    } else {
+      // If client reports it didn't receive properly, resend
+      console.log(
+        `[CONTROLLER] Client ${clientId} reported failed receipt of ${param} - resending`,
+      );
+      updateSynthParam(clientId, param, globalSynthParams.value[param]);
+    }
+  };
+
+  // Optimized global parameter update function with versioning
   const updateGlobalSynthParam = (param: string, value: any) => {
     // Skip if value hasn't changed
     if (globalSynthParams.value[param] === value) return;
+
+    // Update version for this parameter
+    const version = Date.now();
+    paramVersions.value = {
+      ...paramVersions.value,
+      [param]: version,
+    };
 
     // Update global params state in one operation
     globalSynthParams.value = {
@@ -808,10 +942,26 @@ export default function Controller({ user }: ControllerProps) {
 
     if (connectedClientIds.length === 0) return;
 
-    // Update each client (the updateSynthParam function is now efficient)
+    // Update each client with versioned parameter
     connectedClientIds.forEach((clientId) => {
-      updateSynthParam(clientId, param, value);
+      const connection = connections.value.get(clientId);
+      if (connection?.dataChannel?.readyState === "open") {
+        try {
+          // Send versioned parameter update
+          connection.dataChannel.send(JSON.stringify({
+            type: "synth_param",
+            param,
+            value,
+            version,
+          }));
+        } catch (error) {
+          console.error(`Error sending synth param to ${clientId}:`, error);
+        }
+      }
     });
+
+    // Save updated parameters to server for persistence
+    saveGlobalParamsToServer();
   };
 
   // Connect to client
@@ -967,7 +1117,14 @@ export default function Controller({ user }: ControllerProps) {
           : client
       );
 
-      // Apply current global parameters to the newly connected client
+      // Send complete global parameter bundle to newly connected client
+      console.log(
+        `[CONTROLLER] Sending initial global parameter bundle to ${targetId}`,
+      );
+      sendGlobalParamsToClient(targetId);
+
+      // For backward compatibility, also send individual parameters
+      // This can be removed once all clients are updated
       Object.entries(globalSynthParams.value).forEach(([param, value]) => {
         if (param !== "note") { // Skip note parameter since it's controlled by MIDI
           updateSynthParam(targetId, param, value);
@@ -1102,7 +1259,14 @@ export default function Controller({ user }: ControllerProps) {
             : client
         );
 
-        // Apply current global parameters to the newly connected client
+        // Send complete global parameter bundle to newly connected client
+        console.log(
+          `[CONTROLLER] Sending initial global parameter bundle to ${targetId}`,
+        );
+        sendGlobalParamsToClient(targetId);
+
+        // For backward compatibility, also send individual parameters
+        // This can be removed once all clients are updated
         Object.entries(globalSynthParams.value).forEach(([param, value]) => {
           if (param !== "note") { // Skip note parameter since it's controlled by MIDI
             updateSynthParam(targetId, param, value);
@@ -1757,14 +1921,16 @@ export default function Controller({ user }: ControllerProps) {
               pingId: jsonMessage.pingId,
               timestamp: Date.now(),
               originalTimestamp: jsonMessage.timestamp,
-              respondingClientId: id.value
+              respondingClientId: id.value,
             }));
-            
-            console.log(`[CONTROLLER] Sent verification pong to ${clientId} for ping ${jsonMessage.pingId}`);
+
+            console.log(
+              `[CONTROLLER] Sent verification pong to ${clientId} for ping ${jsonMessage.pingId}`,
+            );
           }
           return;
         }
-        
+
         // Handle the older connection_verify format for backward compatibility
         if (jsonMessage.type === "connection_verify") {
           console.log(
@@ -1852,6 +2018,36 @@ export default function Controller({ user }: ControllerProps) {
               clients.value = updatedClients;
             }
 
+            return;
+          }
+
+          // Handle global parameter request from client
+          if (jsonMessage.type === "request_global_params") {
+            addLog(`Client ${clientId} requested global parameters`);
+            console.log(
+              `[CONTROLLER] Client ${clientId} requested global parameters`,
+            );
+
+            // Use our helper function to send global params to the client
+            handleGlobalParamRequest(clientId);
+            return;
+          }
+
+          // Handle global parameter bundle acknowledgment
+          if (jsonMessage.type === "params_bundle_ack") {
+            addLog(
+              `Client ${clientId} acknowledged parameter bundle (v${jsonMessage.version})`,
+            );
+            console.log(
+              `[CONTROLLER] Client ${clientId} acknowledged parameter bundle (v${jsonMessage.version})`,
+            );
+
+            // Use our helper function to handle the acknowledgment
+            handleParamAck(clientId, {
+              param: "global_bundle",
+              version: jsonMessage.version,
+              received: true,
+            });
             return;
           }
         } catch (error) {
