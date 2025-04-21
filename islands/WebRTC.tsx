@@ -4,6 +4,7 @@ import { useEffect } from "preact/hooks";
 // Audio context for the synth
 let audioContext: AudioContext | null = null;
 let oscillator: OscillatorNode | null = null;
+let filterNode: BiquadFilterNode | null = null;
 let gainNode: GainNode | null = null;
 
 export default function WebRTC() {
@@ -33,9 +34,13 @@ export default function WebRTC() {
   // Global parameters state
   const globalParams = useSignal<{
     portamento: number;
+    filterCutoff: number;
+    filterResonance: number;
     [key: string]: any;
   }>({
-    portamento: 0
+    portamento: 0,
+    filterCutoff: 2000,
+    filterResonance: 0.5
   });
 
   // Connection health monitoring
@@ -366,6 +371,28 @@ export default function WebRTC() {
         globalParams.value = {
           ...globalParams.value,
           portamento: value
+        };
+        break;
+      case "filterCutoff":
+        if (filterNode) {
+          // Apply filter cutoff frequency
+          filterNode.frequency.value = value;
+        }
+        // Store in global params
+        globalParams.value = {
+          ...globalParams.value,
+          filterCutoff: value
+        };
+        break;
+      case "filterResonance":
+        if (filterNode) {
+          // Apply filter resonance (Q value)
+          filterNode.Q.value = value;
+        }
+        // Store in global params
+        globalParams.value = {
+          ...globalParams.value,
+          filterResonance: value
         };
         break;
       case "waveform":
@@ -890,24 +917,33 @@ export default function WebRTC() {
         audioContext =
           new (window.AudioContext || (window as any).webkitAudioContext)();
 
+        // Create the filter node
+        filterNode = audioContext.createBiquadFilter();
+        filterNode.type = "lowpass";
+        filterNode.frequency.value = globalParams.value.filterCutoff; // Initial cutoff
+        filterNode.Q.value = globalParams.value.filterResonance; // Initial resonance
+        
         // Create the gain node (initially muted)
         gainNode = audioContext.createGain();
         gainNode.gain.value = 0; // Start muted
-        gainNode.connect(audioContext.destination);
-
+        
         // Create and start a single oscillator that runs continuously
         oscillator = audioContext.createOscillator();
         oscillator.type = "sine"; // Default waveform
         oscillator.frequency.value = 440; // Default frequency (A4)
-        oscillator.connect(gainNode);
-
+        
+        // Connect the audio chain: oscillator -> filter -> gain -> output
+        oscillator.connect(filterNode);
+        filterNode.connect(gainNode);
+        gainNode.connect(audioContext.destination);
+        
         // Start the oscillator immediately and let it run continuously
         // We'll control sound with the gain node
         oscillator.start();
 
         audioState.value = audioContext.state;
         addLog(
-          `Audio initialized and oscillator started (${audioState.value})`,
+          `Audio initialized with filter (${audioState.value})`,
         );
       }
 

@@ -82,6 +82,8 @@ interface SynthParams {
   volume: number;
   detune: number;
   portamento: number;
+  filterCutoff: number;
+  filterResonance: number;
 }
 
 // Default synth parameters
@@ -92,6 +94,8 @@ const defaultSynthParams: SynthParams = {
   volume: 0.1,
   detune: 0,
   portamento: 0,
+  filterCutoff: 2000, // Default cutoff at 2kHz
+  filterResonance: 0.5, // Moderate resonance
 };
 
 // Note frequencies mapping - all semitones from A4 to A5
@@ -356,6 +360,104 @@ function SynthControls(
             </div>
           </div>
         </div>
+        
+        {/* Filter Cutoff Knob */}
+        <div className="control-group-compact">
+          <label>Filter Cutoff</label>
+          <div className="knob-container knob-container-compact">
+            <div
+              className="knob knob-compact"
+              onMouseDown={(startEvent) => {
+                // Initial Y position
+                const startY = startEvent.clientY;
+                // Convert to log scale for calculations
+                const startLogCutoff = Math.log(params.filterCutoff / 20) / Math.log(1000);
+
+                // Function to handle mouse movement
+                const handleMouseMove = (moveEvent: MouseEvent) => {
+                  const deltaY = startY - moveEvent.clientY;
+                  // 100px movement = full range
+                  const normalizedChange = deltaY / 100;
+                  // Clamp between 0 and 1 (20Hz to 20kHz)
+                  const newNormalized = Math.max(
+                    0,
+                    Math.min(1, startLogCutoff + normalizedChange),
+                  );
+                  // Convert back to frequency
+                  const newCutoff = 20 * Math.pow(1000, newNormalized);
+                  onParamChange("filterCutoff", newCutoff);
+                };
+
+                // Function to handle mouse up
+                const handleMouseUp = () => {
+                  document.removeEventListener("mousemove", handleMouseMove);
+                  document.removeEventListener("mouseup", handleMouseUp);
+                };
+
+                // Add listeners
+                document.addEventListener("mousemove", handleMouseMove);
+                document.addEventListener("mouseup", handleMouseUp);
+              }}
+              onDoubleClick={() => onParamChange("filterCutoff", 2000)} // Double click to reset
+              style={{
+                "--rotation": `${(Math.log(params.filterCutoff / 20) / Math.log(1000)) * 270 - 135}deg`,
+              } as any}
+            />
+            <div className="knob-value knob-value-compact">
+              {params.filterCutoff >= 1000 
+                ? (params.filterCutoff / 1000).toFixed(1) + "kHz" 
+                : Math.round(params.filterCutoff) + "Hz"}
+            </div>
+          </div>
+        </div>
+        
+        {/* Filter Resonance Knob */}
+        <div className="control-group-compact">
+          <label>Resonance</label>
+          <div className="knob-container knob-container-compact">
+            <div
+              className="knob knob-compact"
+              onMouseDown={(startEvent) => {
+                // Initial Y position
+                const startY = startEvent.clientY;
+                // Convert from 0.1-20 range to 0-1 for calculations
+                const startNormalized = Math.sqrt((params.filterResonance - 0.1) / 19.9);
+
+                // Function to handle mouse movement
+                const handleMouseMove = (moveEvent: MouseEvent) => {
+                  const deltaY = startY - moveEvent.clientY;
+                  // 100px movement = full range
+                  const normalizedChange = deltaY / 100;
+                  // Clamp between 0 and 1
+                  const newNormalized = Math.max(
+                    0,
+                    Math.min(1, startNormalized + normalizedChange),
+                  );
+                  // Convert back to resonance value
+                  const newResonance = 0.1 + Math.pow(newNormalized, 2) * 19.9;
+                  onParamChange("filterResonance", newResonance);
+                };
+
+                // Function to handle mouse up
+                const handleMouseUp = () => {
+                  document.removeEventListener("mousemove", handleMouseMove);
+                  document.removeEventListener("mouseup", handleMouseUp);
+                };
+
+                // Add listeners
+                document.addEventListener("mousemove", handleMouseMove);
+                document.addEventListener("mouseup", handleMouseUp);
+              }}
+              onDoubleClick={() => onParamChange("filterResonance", 0.5)} // Double click to reset
+              style={{
+                "--rotation": `${(Math.sqrt((params.filterResonance - 0.1) / 19.9)) * 270 - 135}deg`,
+              } as any}
+            />
+            <div className="knob-value knob-value-compact">
+              {params.filterResonance.toFixed(1)}
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -473,6 +575,104 @@ function GlobalSynthControls(
               {params.portamento < 0.1 
                 ? Math.round(params.portamento * 1000) + "ms" 
                 : params.portamento.toFixed(2) + "s"}
+            </div>
+          </div>
+        </div>
+        
+        {/* Filter Cutoff Knob */}
+        <div className="control-group">
+          <label>Filter Cutoff (CC 71)</label>
+          <div className="knob-container">
+            <div
+              className="knob"
+              onMouseDown={(startEvent) => {
+                // Initial Y position
+                const startY = startEvent.clientY;
+                // Convert to log scale for calculations
+                const startLogCutoff = Math.log(params.filterCutoff / 20) / Math.log(1000);
+
+                // Function to handle mouse movement
+                const handleMouseMove = (moveEvent: MouseEvent) => {
+                  const deltaY = startY - moveEvent.clientY;
+                  // 100px movement = full range
+                  const normalizedChange = deltaY / 100;
+                  // Clamp between 0 and 1 (20Hz to 20kHz)
+                  const newNormalized = Math.max(
+                    0,
+                    Math.min(1, startLogCutoff + normalizedChange),
+                  );
+                  // Convert back to frequency
+                  const newCutoff = 20 * Math.pow(1000, newNormalized);
+                  onParamChange("filterCutoff", newCutoff);
+                };
+
+                // Function to handle mouse up
+                const handleMouseUp = () => {
+                  document.removeEventListener("mousemove", handleMouseMove);
+                  document.removeEventListener("mouseup", handleMouseUp);
+                };
+
+                // Add listeners
+                document.addEventListener("mousemove", handleMouseMove);
+                document.addEventListener("mouseup", handleMouseUp);
+              }}
+              onDoubleClick={() => onParamChange("filterCutoff", 2000)} // Double click to reset
+              style={{
+                "--rotation": `${(Math.log(params.filterCutoff / 20) / Math.log(1000)) * 270 - 135}deg`,
+              } as any}
+            />
+            <div className="knob-value">
+              {params.filterCutoff >= 1000 
+                ? (params.filterCutoff / 1000).toFixed(1) + "kHz" 
+                : Math.round(params.filterCutoff) + "Hz"}
+            </div>
+          </div>
+        </div>
+        
+        {/* Filter Resonance Knob */}
+        <div className="control-group">
+          <label>Resonance (CC 75)</label>
+          <div className="knob-container">
+            <div
+              className="knob"
+              onMouseDown={(startEvent) => {
+                // Initial Y position
+                const startY = startEvent.clientY;
+                // Convert from 0.1-20 range to 0-1 for calculations
+                const startNormalized = Math.sqrt((params.filterResonance - 0.1) / 19.9);
+
+                // Function to handle mouse movement
+                const handleMouseMove = (moveEvent: MouseEvent) => {
+                  const deltaY = startY - moveEvent.clientY;
+                  // 100px movement = full range
+                  const normalizedChange = deltaY / 100;
+                  // Clamp between 0 and 1
+                  const newNormalized = Math.max(
+                    0,
+                    Math.min(1, startNormalized + normalizedChange),
+                  );
+                  // Convert back to resonance value
+                  const newResonance = 0.1 + Math.pow(newNormalized, 2) * 19.9;
+                  onParamChange("filterResonance", newResonance);
+                };
+
+                // Function to handle mouse up
+                const handleMouseUp = () => {
+                  document.removeEventListener("mousemove", handleMouseMove);
+                  document.removeEventListener("mouseup", handleMouseUp);
+                };
+
+                // Add listeners
+                document.addEventListener("mousemove", handleMouseMove);
+                document.addEventListener("mouseup", handleMouseUp);
+              }}
+              onDoubleClick={() => onParamChange("filterResonance", 0.5)} // Double click to reset
+              style={{
+                "--rotation": `${(Math.sqrt((params.filterResonance - 0.1) / 19.9)) * 270 - 135}deg`,
+              } as any}
+            />
+            <div className="knob-value">
+              {params.filterResonance.toFixed(1)}
             </div>
           </div>
         </div>
@@ -2863,6 +3063,32 @@ export default function Controller({ user }: ControllerProps) {
         // Apply to all clients using global parameter
         updateGlobalSynthParam("portamento", portamentoTime);
         addLog(`MIDI CC 73: Set portamento to ${displayTime} for all clients`);
+      } // CC 71 - Filter Cutoff (exponential curve 20-20000Hz)
+      else if (controlNumber === 71) {
+        // Normalize to 0-1
+        const normalized = value / 127;
+        
+        // Apply exponential curve for logarithmic frequency response
+        // Map to 20-20000Hz range (logarithmic scale feels natural for frequencies)
+        const filterCutoff = 20 * Math.pow(1000, normalized);
+        
+        // Format for display
+        const displayCutoff = filterCutoff >= 1000 
+          ? (filterCutoff / 1000).toFixed(1) + "kHz" 
+          : Math.round(filterCutoff) + "Hz";
+        
+        // Apply to all clients using global parameter
+        updateGlobalSynthParam("filterCutoff", filterCutoff);
+        addLog(`MIDI CC 71: Set filter cutoff to ${displayCutoff} for all clients`);
+      } // CC 75 - Filter Resonance (0.1 to 20)
+      else if (controlNumber === 75) {
+        // Normalize and map to resonance range (0.1-20)
+        // Using a curve that gives more precision in lower values
+        const resonance = 0.1 + Math.pow(value / 127, 2) * 19.9;
+        
+        // Apply to all clients using global parameter
+        updateGlobalSynthParam("filterResonance", resonance);
+        addLog(`MIDI CC 75: Set filter resonance to ${resonance.toFixed(1)} for all clients`);
       } // CC 1 is usually modulation wheel, use for detune
       else if (controlNumber === 1) {
         const detune = Math.floor((value / 127) * 200) - 100; // Map 0-127 to -100 to +100
