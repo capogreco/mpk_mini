@@ -1,10 +1,10 @@
 import { useSignal } from "@preact/signals";
 import { useEffect } from "preact/hooks";
 
-// Controller API using simplified status.ts endpoint
+// Controller API using lock.ts endpoint
 async function acquireControllerLock(controllerId: string): Promise<boolean> {
   try {
-    const resp = await fetch("/api/controller/status", {
+    const resp = await fetch("/api/controller/lock", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -14,7 +14,7 @@ async function acquireControllerLock(controllerId: string): Promise<boolean> {
 
     if (!resp.ok) return false;
     const data = await resp.json();
-    return data.success && data.isActive;
+    return data.success;
   } catch (error) {
     console.error("Failed to acquire controller lock:", error);
     return false;
@@ -23,7 +23,7 @@ async function acquireControllerLock(controllerId: string): Promise<boolean> {
 
 async function releaseControllerLock(controllerId: string): Promise<boolean> {
   try {
-    const resp = await fetch("/api/controller/status", {
+    const resp = await fetch("/api/controller/lock", {
       method: "DELETE",
       headers: {
         "Content-Type": "application/json",
@@ -43,7 +43,7 @@ async function releaseControllerLock(controllerId: string): Promise<boolean> {
 // Send controller heartbeat to maintain active status
 async function sendControllerHeartbeat(controllerId: string): Promise<boolean> {
   try {
-    const resp = await fetch("/api/controller/status", {
+    const resp = await fetch("/api/controller/lock", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -56,7 +56,7 @@ async function sendControllerHeartbeat(controllerId: string): Promise<boolean> {
 
     if (!resp.ok) return false;
     const data = await resp.json();
-    return data.success && data.isActive;
+    return data.success;
   } catch (error) {
     console.error("Failed to send controller heartbeat:", error);
     return false;
