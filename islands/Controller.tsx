@@ -793,67 +793,7 @@ export default function Controller({ user }: ControllerProps) {
   // Track parameter versions to ensure freshness
   const paramVersions = useSignal<{ [key: string]: number }>({});
 
-  // Persistent storage for global parameters (via server)
-  const saveGlobalParamsToServer = async () => {
-    try {
-      // Only controllers should save global params
-      if (idType.value !== "controller" || !controlActive.value) return;
-
-      const resp = await fetch("/api/controller/params", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          controllerId: id.value,
-          params: globalSynthParams.value,
-          version: Date.now(),
-        }),
-      });
-
-      if (!resp.ok) {
-        console.error("[CONTROLLER] Failed to save global parameters");
-      } else {
-        console.log("[CONTROLLER] Global parameters saved to server");
-      }
-    } catch (error) {
-      console.error("[CONTROLLER] Error saving global parameters:", error);
-    }
-  };
-
-  // Load global params from server (for controller continuity)
-  const loadGlobalParamsFromServer = async () => {
-    try {
-      const resp = await fetch("/api/controller/params");
-
-      if (resp.ok) {
-        const data = await resp.json();
-        if (data.params) {
-          console.log(
-            "[CONTROLLER] Loaded global params from server:",
-            data.params,
-          );
-          globalSynthParams.value = {
-            ...globalSynthParams.value,
-            ...data.params,
-          };
-
-          // Update version tracking
-          if (data.version) {
-            Object.keys(data.params).forEach((param) => {
-              paramVersions.value[param] = data.version;
-            });
-          }
-
-          return true;
-        }
-      }
-    } catch (error) {
-      console.error("[CONTROLLER] Error loading global parameters:", error);
-    }
-
-    return false;
-  };
+  // Note: Server persistence disabled - parameters stored only in controller memory
 
   // Send complete global parameter state to a client
   const sendGlobalParamsToClient = (clientId: string) => {
@@ -960,8 +900,7 @@ export default function Controller({ user }: ControllerProps) {
       }
     });
 
-    // Save updated parameters to server for persistence
-    saveGlobalParamsToServer();
+    // Parameter changes stored in memory only (server persistence disabled)
   };
 
   // Connect to client
