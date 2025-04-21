@@ -116,11 +116,14 @@ function isController(id: string): boolean {
   return id.startsWith(CONTROLLER_PREFIX);
 }
 
+// Import the controller manager
+import * as controllerManager from "./controller/manager.ts";
+
 // Check for controller change notifications in KV store
 async function checkForControllerChangeNotifications() {
   try {
-    // Get the latest notification
-    const notification = await kv.get(CONTROLLER_CHANGE_NOTIFICATION_KEY);
+    // Get the latest notification using the controller manager's key
+    const notification = await kv.get(controllerManager.CONTROLLER_NOTIFICATION_KEY);
 
     // Skip if no notification or we've already processed this one
     if (
@@ -151,8 +154,13 @@ async function checkForControllerChangeNotifications() {
       }, id=${notificationId}`,
     );
 
+    // Ensure controller ID is standardized
+    const standardizedId = controllerId 
+      ? controllerManager.standardizeControllerId(controllerId) 
+      : null;
+
     // Broadcast to all clients connected to this instance
-    await broadcastControllerChange(controllerId);
+    await broadcastControllerChange(standardizedId);
 
     // Remember that we've processed this notification
     lastProcessedNotificationId = notificationId;
@@ -242,34 +250,32 @@ async function broadcastControllerChange(controllerId: string | null) {
 }
 
 // Set the active controller and notify all clients
-// Legacy function - in new system, we now use controller/status.ts
+// Now delegates to the controller manager
 async function setActiveController(controllerId: string | null) {
   console.log(
     `[SIGNAL] setActiveController called with: ${controllerId || "none"}`,
   );
 
-  // We no longer store the active controller in this function
-  // Instead we just broadcast the change to all clients
-  // This maintains backward compatibility while simplifying the system
+  if (controllerId) {
+    // Standardize the controller ID if needed
+    const standardId = controllerManager.standardizeControllerId(controllerId);
+    
+    // Use the controller manager to set the active controller
+    await controllerManager.setActiveController(standardId);
+  } else {
+    // If controllerId is null, force reset the controller state
+    await controllerManager.forceResetControllerState();
+  }
 
-  // Just broadcast the notification
+  // Broadcast to all connected clients
   return await broadcastControllerChange(controllerId);
 }
 
-// Get the active controller (legacy compatibility function)
+// Get the active controller - now using the controller manager
 async function getActiveController(): Promise<string | null> {
-  // New system uses a different key
-  const NEW_CONTROLLER_KEY = ["webrtc", "active_controller"];
-
-  // Try new key first
-  const newController = await kv.get(NEW_CONTROLLER_KEY);
-  if (newController.value) {
-    return newController.value.id;
-  }
-
-  // Fall back to old key if necessary
-  const oldController = await kv.get(ACTIVE_CONTROLLER_KEY);
-  return oldController.value ? oldController.value.id : null;
+  // Use the controller manager to get the active controller
+  const controller = await controllerManager.getActiveController();
+  return controller ? controller.id : null;
 }
 
 // Function to check if a client has any active WebRTC connections with any controller

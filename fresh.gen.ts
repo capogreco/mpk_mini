@@ -7,6 +7,7 @@ import * as $_app from "./routes/_app.tsx";
 import * as $api_client_id from "./routes/api/client-id.ts";
 import * as $api_controller_clear from "./routes/api/controller/clear.ts";
 import * as $api_controller_lock from "./routes/api/controller/lock.ts";
+import * as $api_controller_manager from "./routes/api/controller/manager.ts";
 import * as $api_controller_params from "./routes/api/controller/params.ts";
 import * as $api_controller_status from "./routes/api/controller/status.ts";
 import * as $api_joke from "./routes/api/joke.ts";
@@ -30,6 +31,7 @@ const manifest = {
     "./routes/api/client-id.ts": $api_client_id,
     "./routes/api/controller/clear.ts": $api_controller_clear,
     "./routes/api/controller/lock.ts": $api_controller_lock,
+    "./routes/api/controller/manager.ts": $api_controller_manager,
     "./routes/api/controller/params.ts": $api_controller_params,
     "./routes/api/controller/status.ts": $api_controller_status,
     "./routes/api/joke.ts": $api_joke,
