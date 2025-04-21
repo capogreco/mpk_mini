@@ -81,6 +81,7 @@ interface SynthParams {
   note: string;
   volume: number;
   detune: number;
+  portamento: number;
 }
 
 // Default synth parameters
@@ -90,6 +91,7 @@ const defaultSynthParams: SynthParams = {
   note: "A4",
   volume: 0.1,
   detune: 0,
+  portamento: 0,
 };
 
 // Note frequencies mapping - all semitones from A4 to A5
@@ -306,6 +308,54 @@ function SynthControls(
             </div>
           </div>
         </div>
+        
+        {/* Portamento Knob */}
+        <div className="control-group-compact">
+          <label>Portamento</label>
+          <div className="knob-container knob-container-compact">
+            <div
+              className="knob knob-compact"
+              onMouseDown={(startEvent) => {
+                // Initial Y position
+                const startY = startEvent.clientY;
+                const startPortamento = params.portamento;
+
+                // Function to handle mouse movement
+                const handleMouseMove = (moveEvent: MouseEvent) => {
+                  const deltaY = startY - moveEvent.clientY;
+                  // 100px movement = full portamento range
+                  const normalizedChange = deltaY / 100;
+                  const newNormalized = Math.max(
+                    0,
+                    Math.min(1, (startPortamento / 12) ** 0.25 + normalizedChange),
+                  );
+                  // Apply exponential curve for fine control
+                  const newPortamento = Math.pow(newNormalized, 4) * 12;
+                  onParamChange("portamento", newPortamento);
+                };
+
+                // Function to handle mouse up
+                const handleMouseUp = () => {
+                  document.removeEventListener("mousemove", handleMouseMove);
+                  document.removeEventListener("mouseup", handleMouseUp);
+                };
+
+                // Add listeners
+                document.addEventListener("mousemove", handleMouseMove);
+                document.addEventListener("mouseup", handleMouseUp);
+              }}
+              onDoubleClick={() => onParamChange("portamento", 0)} // Double click to reset to 0
+              style={{
+                "--rotation": `${Math.pow(params.portamento / 12, 0.25) * 270 - 135}deg`,
+              } as any}
+            />
+            <div className="knob-value knob-value-compact">
+              {params.portamento < 0.1 
+                ? Math.round(params.portamento * 1000) + "ms" 
+                : params.portamento.toFixed(2) + "s"}
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -379,29 +429,29 @@ function GlobalSynthControls(
           </div>
         </div>
 
-        {/* Detune Knob */}
+        {/* Portamento Knob */}
         <div className="control-group">
-          <label>Detune (CC 1)</label>
+          <label>Portamento (CC 73)</label>
           <div className="knob-container">
             <div
-              className={`knob detune-knob ${
-                params.detune === 0 ? "centered" : ""
-              }`}
+              className="knob"
               onMouseDown={(startEvent) => {
                 // Initial Y position
                 const startY = startEvent.clientY;
-                const startDetune = params.detune;
+                const startPortamento = params.portamento;
 
                 // Function to handle mouse movement
                 const handleMouseMove = (moveEvent: MouseEvent) => {
                   const deltaY = startY - moveEvent.clientY;
-                  // 50px movement = 100 cents (1 semitone) range
-                  const detuneChange = deltaY * 2; // 2 cents per pixel
-                  const newDetune = Math.max(
-                    -100,
-                    Math.min(100, startDetune + detuneChange),
+                  // 100px movement = full portamento range
+                  const normalizedChange = deltaY / 100;
+                  const newNormalized = Math.max(
+                    0,
+                    Math.min(1, (startPortamento / 12) ** 0.25 + normalizedChange),
                   );
-                  onParamChange("detune", Math.round(newDetune));
+                  // Apply exponential curve for fine control
+                  const newPortamento = Math.pow(newNormalized, 4) * 12;
+                  onParamChange("portamento", newPortamento);
                 };
 
                 // Function to handle mouse up
@@ -414,13 +464,15 @@ function GlobalSynthControls(
                 document.addEventListener("mousemove", handleMouseMove);
                 document.addEventListener("mouseup", handleMouseUp);
               }}
-              onDoubleClick={() => onParamChange("detune", 0)} // Double click to reset to 0
+              onDoubleClick={() => onParamChange("portamento", 0)} // Double click to reset to 0
               style={{
-                "--rotation": `${params.detune * 1.35}deg`,
+                "--rotation": `${Math.pow(params.portamento / 12, 0.25) * 270 - 135}deg`,
               } as any}
             />
             <div className="knob-value">
-              {params.detune > 0 ? `+${params.detune}` : params.detune} ¢
+              {params.portamento < 0.1 
+                ? Math.round(params.portamento * 1000) + "ms" 
+                : params.portamento.toFixed(2) + "s"}
             </div>
           </div>
         </div>
@@ -2791,6 +2843,26 @@ export default function Controller({ user }: ControllerProps) {
             Math.round(volume * 100)
           }% for all clients`,
         );
+      } // CC 73 - Portamento Time (exponential curve 0-12s)
+      else if (controlNumber === 73) {
+        // Normalize to 0-1
+        const normalized = value / 127;
+        
+        // Apply exponential curve for fine control of shorter times
+        // Using exponent of 4 to create heavily weighted curve
+        const curved = Math.pow(normalized, 4);
+        
+        // Scale to 0-12 seconds
+        const portamentoTime = curved * 12;
+        
+        // Round to readable format for logging
+        const displayTime = portamentoTime < 0.1 
+          ? Math.round(portamentoTime * 1000) + "ms"
+          : portamentoTime.toFixed(2) + "s";
+        
+        // Apply to all clients using global parameter
+        updateGlobalSynthParam("portamento", portamentoTime);
+        addLog(`MIDI CC 73: Set portamento to ${displayTime} for all clients`);
       } // CC 1 is usually modulation wheel, use for detune
       else if (controlNumber === 1) {
         const detune = Math.floor((value / 127) * 200) - 100; // Map 0-127 to -100 to +100

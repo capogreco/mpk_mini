@@ -29,6 +29,14 @@ export default function WebRTC() {
   const showAudioButton = useSignal(true);
   const showResumeAudioButton = useSignal(false);
   const reconnectAttemptInterval = useSignal<number | null>(null);
+  
+  // Global parameters state
+  const globalParams = useSignal<{
+    portamento: number;
+    [key: string]: any;
+  }>({
+    portamento: 0
+  });
 
   // Connection health monitoring
   const lastMessageReceivedTime = useSignal<number>(0);
@@ -330,9 +338,35 @@ export default function WebRTC() {
         }
         break;
       case "frequency":
-        if (oscillator) {
-          oscillator.frequency.value = value;
+        if (oscillator && audioContext) {
+          const currentTime = audioContext.currentTime;
+          const currentFrequency = oscillator.frequency.value;
+          const portamentoTime = globalParams.value.portamento || 0;
+          
+          // If portamento is 0 or very small, set value immediately
+          if (portamentoTime < 0.005) {
+            oscillator.frequency.value = value;
+          } else {
+            // Apply portamento - cancel any scheduled changes first
+            oscillator.frequency.cancelScheduledValues(currentTime);
+            
+            // Set current frequency explicitly at current time as starting point
+            oscillator.frequency.setValueAtTime(currentFrequency, currentTime);
+            
+            // Schedule exponential ramp to new value
+            oscillator.frequency.exponentialRampToValueAtTime(
+              value, 
+              currentTime + portamentoTime
+            );
+          }
         }
+        break;
+      case "portamento":
+        // Store portamento value in global params
+        globalParams.value = {
+          ...globalParams.value,
+          portamento: value
+        };
         break;
       case "waveform":
         if (oscillator) {
@@ -368,6 +402,14 @@ export default function WebRTC() {
     // Initialize audio if needed and not already done
     if (!audioEnabled.value && audioContext === null) {
       initAudio();
+    }
+    
+    // Update our local tracking of global parameters
+    if (params.portamento !== undefined) {
+      globalParams.value = {
+        ...globalParams.value,
+        portamento: params.portamento
+      };
     }
 
     // Process each parameter in the bundle
