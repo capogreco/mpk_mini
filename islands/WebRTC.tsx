@@ -8,1210 +8,1141 @@ let gainNode: GainNode | null = null;
 
 export default function WebRTC() {
   // State management
-  const id = useSignal(Math.random().toString(36).substring(2, 8))
-  const targetId = useSignal("")
-  const connected = useSignal(false)
-  const message = useSignal("")
-  const logs = useSignal<string[]>([])
-  const connection = useSignal<RTCPeerConnection | null>(null)
-  const dataChannel = useSignal<RTCDataChannel | null>(null)
-  const socket = useSignal<WebSocket | null>(null)
-  const activeController = useSignal<string | null>(null)
-  const autoConnectAttempted = useSignal(false)
-  
+  const id = useSignal(""); // Will be set by server
+  const idType = useSignal("synth"); // Default client type
+  const idLoaded = useSignal(false); // Track if we've received our ID from the server
+  const targetId = useSignal("");
+  const connected = useSignal(false);
+  const message = useSignal("");
+  const logs = useSignal<string[]>([]);
+  const connection = useSignal<RTCPeerConnection | null>(null);
+  const dataChannel = useSignal<RTCDataChannel | null>(null);
+  const socket = useSignal<WebSocket | null>(null);
+  const activeController = useSignal<string | null>(null);
+  const connectedControllerId = useSignal<string | null>(null); // Track which controller we're connected to
+  const lastControllerChangeTime = useSignal<number>(0); // Track when controller was last changed
+  const autoConnectAttempted = useSignal(false);
+
   // Audio context state
-  const audioEnabled = useSignal(false)
-  const audioState = useSignal<string>("suspended")
-  const showAudioButton = useSignal(true) // Start by showing the enable audio button
-  
-  // Synth parameters
-  const frequency = useSignal(440) // A4 note
-  const waveform = useSignal<OscillatorType>("sine")
-  const volume = useSignal(0.1) // 0-1 range
-  const oscillatorEnabled = useSignal(true) // On/off state for oscillator
-  const detune = useSignal(0) // Detune value in cents (-100 to +100, represents -1 to +1 semitones)
-  const currentNote = useSignal("A4") // Current note name
-  
+  const audioEnabled = useSignal(false);
+  const audioState = useSignal<string>("suspended");
+  const showAudioButton = useSignal(true);
+  const showResumeAudioButton = useSignal(false);
+  const reconnectAttemptInterval = useSignal<number | null>(null);
+
+  // Connection health monitoring
+  const lastMessageReceivedTime = useSignal<number>(0);
+  const iceConnectionState = useSignal<string>("new");
+  const connectionHealthy = useSignal<boolean>(false);
+  const heartbeatInterval = useSignal<number | null>(null);
+
+  // WebSocket connection status
+  const wsConnected = useSignal(false);
+  const wsReconnecting = useSignal(false);
+  const wsReconnectAttempts = useSignal<number>(0);
+
   // Format timestamp
   const formatTime = () => {
-    const now = new Date()
-    const hours = now.getHours().toString().padStart(2, '0')
-    const minutes = now.getMinutes().toString().padStart(2, '0')
-    const seconds = now.getSeconds().toString().padStart(2, '0')
-    const ms = now.getMilliseconds().toString().padStart(3, '0')
-    return `${hours}:${minutes}:${seconds}.${ms}`
-  }
-  
+    const now = new Date();
+    const hours = now.getHours().toString().padStart(2, "0");
+    const minutes = now.getMinutes().toString().padStart(2, "0");
+    const seconds = now.getSeconds().toString().padStart(2, "0");
+    return `${hours}:${minutes}:${seconds}`;
+  };
+
   // Add a log entry
   const addLog = (text: string) => {
-    logs.value = [...logs.value, `${formatTime()}: ${text}`]
+    const maxLogs = 50;
+    logs.value = [...logs.value, `${formatTime()}: ${text}`].slice(-maxLogs);
+
     // Scroll to bottom
     setTimeout(() => {
-      const logEl = document.querySelector('.log')
-      if (logEl) logEl.scrollTop = logEl.scrollHeight
-    }, 0)
-  }
-  
-  // Connect to the target peer
-  const connect = async () => {
-    if (!targetId.value) {
-      addLog('Please enter a target ID')
-      return
+      const logEl = document.querySelector(".log");
+      if (logEl) logEl.scrollTop = logEl.scrollHeight;
+    }, 0);
+  };
+
+  // Request a server-generated client ID
+  const requestClientId = async () => {
+    try {
+      console.log("[SYNTH] Requesting client ID from server");
+      addLog("Requesting client ID from server...");
+
+      const response = await fetch("/api/client-id", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ type: idType.value }),
+      });
+
+      if (!response.ok) {
+        addLog("Failed to get client ID");
+        return false;
+      }
+
+      const data = await response.json();
+
+      if (data.success && data.clientId) {
+        id.value = data.clientId;
+        idLoaded.value = true;
+        addLog(`Received client ID: ${data.clientId}`);
+        return true;
+      } else {
+        addLog("Invalid client ID response");
+        return false;
+      }
+    } catch (error) {
+      addLog(`Error requesting client ID: ${error.message}`);
+      return false;
     }
-    
-    await initRTC()
-  }
-  
+  };
+
   // Fetch ICE servers from Twilio
   const fetchIceServers = async () => {
     try {
-      const response = await fetch('/api/twilio-ice');
+      const response = await fetch("/api/twilio-ice");
       if (!response.ok) {
-        console.error('Failed to fetch ICE servers from Twilio');
+        console.error("Failed to fetch ICE servers from Twilio");
         // Fallback to Google's STUN server
-        return [{ urls: 'stun:stun.l.google.com:19302' }];
+        return [{ urls: "stun:stun.l.google.com:19302" }];
       }
-      
+
       const data = await response.json();
-      console.log('Retrieved ICE servers from Twilio:', data.iceServers);
       return data.iceServers;
     } catch (error) {
-      console.error('Error fetching ICE servers:', error);
+      console.error("Error fetching ICE servers:", error);
       // Fallback to Google's STUN server
-      return [{ urls: 'stun:stun.l.google.com:19302' }];
+      return [{ urls: "stun:stun.l.google.com:19302" }];
     }
   };
-  
-  // Initialize the WebRTC connection
-  const initRTC = async () => {
+
+  // Initialize WebRTC connection
+  const initRTC = async (targetControllerId: string, isReconnect = false) => {
+    if (!wsConnected.value) {
+      addLog("WebSocket not connected. Connect to signaling server first.");
+      await connectWebSocket();
+      if (!wsConnected.value) {
+        addLog(
+          "Failed to connect to signaling server. Cannot establish WebRTC connection.",
+        );
+        return;
+      }
+    }
+
+    // If there's an existing connection and it's not a reconnect, close it
+    if (connection.value && !isReconnect) {
+      addLog("Closing existing connection before creating a new one");
+      cleanupConnection();
+    }
+
     // Get ICE servers from Twilio
     const iceServers = await fetchIceServers();
-    console.log('Using ICE servers:', iceServers);
-    
+    console.log("[SYNTH] Using ICE servers:", iceServers);
+
     const peerConnection = new RTCPeerConnection({
-      iceServers
+      iceServers,
     });
-    connection.value = peerConnection
-    
-    // Create data channel
-    const channel = peerConnection.createDataChannel('dataChannel')
-    dataChannel.value = channel
-    
-    channel.onopen = () => {
-      addLog('Data channel opened')
-      connected.value = true
-      
-      // Send current synth parameters to the controller
-      if (audioEnabled.value) {
-        try {
-          // Send frequency
-          channel.send(JSON.stringify({
-            type: 'synth_param',
-            param: 'frequency',
-            value: frequency.value
-          }));
-          
-          // Send waveform
-          channel.send(JSON.stringify({
-            type: 'synth_param',
-            param: 'waveform',
-            value: waveform.value
-          }));
-          
-          // Send volume
-          channel.send(JSON.stringify({
-            type: 'synth_param',
-            param: 'volume',
-            value: volume.value
-          }));
-          
-          // Send oscillator enabled state
-          channel.send(JSON.stringify({
-            type: 'synth_param',
-            param: 'oscillatorEnabled',
-            value: oscillatorEnabled.value
-          }));
-          
-          // Send note
-          channel.send(JSON.stringify({
-            type: 'synth_param',
-            param: 'note',
-            value: currentNote.value
-          }));
-          
-          // Send detune
-          channel.send(JSON.stringify({
-            type: 'synth_param',
-            param: 'detune',
-            value: detune.value
-          }));
-          
-          // Send audio state
-          channel.send(JSON.stringify({
-            type: 'audio_state',
-            audioEnabled: audioEnabled.value,
-            audioState: audioState.value
-          }));
-          
-          addLog('Sent synth parameters and audio state to controller');
-        } catch (error) {
-          console.error("Error sending synth parameters:", error);
-        }
-      } else {
-        // Even if audio is not enabled, send the audio state
-        try {
-          channel.send(JSON.stringify({
-            type: 'audio_state',
-            audioEnabled: false,
-            audioState: 'disabled'
-          }));
-          addLog('Sent audio state to controller (audio not enabled)');
-        } catch (error) {
-          console.error("Error sending audio state:", error);
-        }
+
+    connection.value = peerConnection;
+    connected.value = false;
+    connectionHealthy.value = false;
+
+    // Set up ICE candidate handling
+    peerConnection.onicecandidate = (event) => {
+      if (
+        event.candidate && socket.value &&
+        socket.value.readyState === WebSocket.OPEN
+      ) {
+        socket.value.send(JSON.stringify({
+          type: "ice-candidate",
+          target: targetControllerId,
+          data: event.candidate,
+        }));
       }
-    }
-    
-    channel.onclose = () => {
-      addLog('Data channel closed')
-      connected.value = false
-    }
-    
-    channel.onmessage = (event) => {
-      console.log("[CLIENT] Received message:", event.data);
-      
-      // Try to parse JSON messages
-      if (typeof event.data === 'string' && event.data.startsWith('{')) {
-        try {
-          const message = JSON.parse(event.data);
-          
-          // Handle synth parameter update messages
-          if (message.type === 'synth_param') {
-            switch (message.param) {
-              case 'frequency':
-                updateFrequency(Number(message.value));
-                addLog(`Frequency updated to ${message.value}Hz by controller`);
-                break;
-              case 'waveform':
-                updateWaveform(message.value as OscillatorType);
-                addLog(`Waveform updated to ${message.value} by controller`);
-                break;
-              case 'volume':
-                updateVolume(Number(message.value));
-                addLog(`Volume updated to ${message.value} by controller`);
-                break;
-              default:
-                addLog(`Unknown synth parameter: ${message.param}`);
-            }
-            return;
-          }
-        } catch (error) {
-          console.error("Error parsing JSON message:", error);
-          // Continue with non-JSON message handling
-        }
-      }
-      
-      // SUPER SIMPLE PING HANDLING
-      // Instead of any complex parsing, just send back exactly what we receive
-      // with "PONG" instead of "PING"
-      if (typeof event.data === 'string' && event.data.startsWith('PING:')) {
-        console.log("[CLIENT] PING detected!");
-        
-        // Create pong response by replacing PING with PONG
-        const pongMessage = event.data.replace('PING:', 'PONG:');
-        console.log("[CLIENT] Sending PONG:", pongMessage);
-        
-        // Send the response immediately
-        try {
-          // Add a small delay to ensure message is processed
+    };
+
+    // Track ICE connection state
+    peerConnection.oniceconnectionstatechange = () => {
+      const state = peerConnection.iceConnectionState;
+      console.log(`[SYNTH] ICE connection state: ${state}`);
+      iceConnectionState.value = state;
+
+      // Update connection health based on ICE state
+      if (state === "connected" || state === "completed") {
+        connectionHealthy.value = true;
+      } else if (
+        state === "disconnected" || state === "failed" || state === "closed"
+      ) {
+        connectionHealthy.value = false;
+
+        // Try reconnection if disconnected or failed
+        if (
+          (state === "disconnected" || state === "failed") &&
+          activeController.value
+        ) {
+          addLog(`ICE connection ${state}. Will attempt reconnection.`);
+          // Use a short delay before attempting reconnection
           setTimeout(() => {
-            try {
-              channel.send(pongMessage);
-              console.log("[CLIENT] PONG sent successfully");
-              addLog(`Responded with ${pongMessage}`);
-            } catch (e) {
-              console.error("[CLIENT] Failed to send delayed PONG:", e);
+            if (!connected.value && activeController.value) {
+              attemptReconnection();
             }
-          }, 10);
-          
-          // Also try sending immediately
-          channel.send(pongMessage);
-          console.log("[CLIENT] PONG sent immediately");
-        } catch (error) {
-          console.error("[CLIENT] Error sending PONG:", error);
-          addLog(`Failed to respond to ping: ${error.message}`);
+          }, 2000);
         }
-        return;
       }
-      
-      // Also handle TEST messages for debug purposes
-      if (typeof event.data === 'string' && event.data.startsWith('TEST:')) {
-        console.log("[CLIENT] TEST message detected!");
-        
-        // Reply with the same test message
-        try {
-          // Echo back the test message
-          channel.send(`ECHOED:${event.data}`);
-          console.log("[CLIENT] Echoed test message");
-          addLog(`Echoed test message`);
-        } catch (error) {
-          console.error("[CLIENT] Error echoing test message:", error);
-          addLog(`Failed to echo test message: ${error.message}`);
-        }
-        return;
-      }
-      
-      // Regular message
-      addLog(`Received: ${event.data}`);
-    }
-    
-    // Handle receiving a data channel
+    };
+
+    // Handle data channel
     peerConnection.ondatachannel = (event) => {
-      const receivedChannel = event.channel
-      dataChannel.value = receivedChannel
-      
-      receivedChannel.onopen = () => {
-        addLog('Data channel opened (received)')
-        connected.value = true
-        
-        // Send current synth parameters to the controller
-        if (audioEnabled.value) {
-          try {
-            // Send frequency
-            receivedChannel.send(JSON.stringify({
-              type: 'synth_param',
-              param: 'frequency',
-              value: frequency.value
-            }));
-            
-            // Send waveform
-            receivedChannel.send(JSON.stringify({
-              type: 'synth_param',
-              param: 'waveform',
-              value: waveform.value
-            }));
-            
-            // Send volume
-            receivedChannel.send(JSON.stringify({
-              type: 'synth_param',
-              param: 'volume',
-              value: volume.value
-            }));
-            
-            // Send oscillator enabled state
-            receivedChannel.send(JSON.stringify({
-              type: 'synth_param',
-              param: 'oscillatorEnabled',
-              value: oscillatorEnabled.value
-            }));
-            
-            // Send note
-            receivedChannel.send(JSON.stringify({
-              type: 'synth_param',
-              param: 'note',
-              value: currentNote.value
-            }));
-            
-            // Send detune
-            receivedChannel.send(JSON.stringify({
-              type: 'synth_param',
-              param: 'detune',
-              value: detune.value
-            }));
-            
-            // Send audio state
-            receivedChannel.send(JSON.stringify({
-              type: 'audio_state',
-              audioEnabled: audioEnabled.value,
-              audioState: audioState.value
-            }));
-            
-            addLog('Sent synth parameters and audio state to controller');
-          } catch (error) {
-            console.error("Error sending synth parameters:", error);
-          }
+      setupDataChannel(event.channel);
+    };
+
+    // Create offer (if we're the synth client reconnecting)
+    if (isReconnect) {
+      try {
+        // Create and set up data channel first
+        const channel = peerConnection.createDataChannel("synthChannel");
+        setupDataChannel(channel);
+
+        // Create offer
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+
+        // Send offer to controller
+        if (socket.value && socket.value.readyState === WebSocket.OPEN) {
+          socket.value.send(JSON.stringify({
+            type: "offer",
+            target: targetControllerId,
+            data: offer,
+          }));
+          addLog(`Sent reconnection offer to controller ${targetControllerId}`);
         } else {
-          // Even if audio is not enabled, send the audio state
-          try {
-            receivedChannel.send(JSON.stringify({
-              type: 'audio_state',
-              audioEnabled: false,
-              audioState: 'disabled'
-            }));
-            addLog('Sent audio state to controller (audio not enabled)');
-          } catch (error) {
-            console.error("Error sending audio state:", error);
-          }
+          addLog("WebSocket not connected. Cannot send offer.");
         }
+      } catch (error) {
+        addLog(`Error creating offer: ${error.message}`);
       }
-      
-      receivedChannel.onclose = () => {
-        addLog('Data channel closed (received)')
-        connected.value = false
+    }
+
+    // Track the controller we're trying to connect to
+    connectedControllerId.value = targetControllerId;
+
+    // Start connection health monitoring
+    startConnectionMonitoring();
+  };
+
+  // Set up data channel
+  const setupDataChannel = (channel: RTCDataChannel) => {
+    dataChannel.value = channel;
+    console.log(`[SYNTH] Data channel ${channel.label} created/received`);
+
+    channel.onopen = () => {
+      addLog("Data channel opened");
+      connected.value = true;
+      connectionHealthy.value = true;
+      lastMessageReceivedTime.value = Date.now();
+
+      // Report audio status to controller
+      sendAudioStatus();
+    };
+
+    channel.onclose = () => {
+      addLog("Data channel closed");
+      connected.value = false;
+      connectionHealthy.value = false;
+
+      // Attempt reconnection to active controller if we have one
+      if (activeController.value) {
+        setTimeout(() => attemptReconnection(), 2000);
       }
-      
-      receivedChannel.onmessage = (event) => {
-        console.log("[CLIENT-RECEIVED] Received message:", event.data);
-        
-        // Try to parse JSON messages
-        if (typeof event.data === 'string' && event.data.startsWith('{')) {
-          try {
-            const message = JSON.parse(event.data);
-            
-            // Handle synth parameter update messages
-            if (message.type === 'synth_param') {
-              switch (message.param) {
-                case 'frequency':
-                  updateFrequency(Number(message.value));
-                  addLog(`Frequency updated to ${message.value}Hz by controller`);
-                  break;
-                case 'waveform':
-                  updateWaveform(message.value as OscillatorType);
-                  addLog(`Waveform updated to ${message.value} by controller`);
-                  break;
-                case 'volume':
-                  updateVolume(Number(message.value));
-                  addLog(`Volume updated to ${message.value} by controller`);
-                  break;
-                default:
-                  addLog(`Unknown synth parameter: ${message.param}`);
-              }
-              return;
-            }
-          } catch (error) {
-            console.error("Error parsing JSON message:", error);
-            // Continue with non-JSON message handling
-          }
-        }
-        
-        // SUPER SIMPLE PING HANDLING
-        // Instead of any complex parsing, just send back exactly what we receive
-        // with "PONG" instead of "PING"
-        if (typeof event.data === 'string' && event.data.startsWith('PING:')) {
-          console.log("[CLIENT-RECEIVED] PING detected!");
-          
-          // Create pong response by replacing PING with PONG
-          const pongMessage = event.data.replace('PING:', 'PONG:');
-          console.log("[CLIENT-RECEIVED] Sending PONG:", pongMessage);
-          
-          // Send the response immediately
-          try {
-            // Add a small delay to ensure message is processed
-            setTimeout(() => {
-              try {
-                receivedChannel.send(pongMessage);
-                console.log("[CLIENT-RECEIVED] PONG sent successfully");
-                addLog(`Responded with ${pongMessage}`);
-              } catch (e) {
-                console.error("[CLIENT-RECEIVED] Failed to send delayed PONG:", e);
-              }
-            }, 10);
-            
-            // Also try sending immediately
-            receivedChannel.send(pongMessage);
-            console.log("[CLIENT-RECEIVED] PONG sent immediately");
-          } catch (error) {
-            console.error("[CLIENT-RECEIVED] Error sending PONG:", error);
-            addLog(`Failed to respond to ping: ${error.message}`);
-          }
-          return;
-        }
-        
-        // Also handle TEST messages for debug purposes
-        if (typeof event.data === 'string' && event.data.startsWith('TEST:')) {
-          console.log("[CLIENT-RECEIVED] TEST message detected!");
-          
-          // Reply with the same test message
-          try {
-            // Echo back the test message
-            receivedChannel.send(`ECHOED:${event.data}`);
-            console.log("[CLIENT-RECEIVED] Echoed test message");
-            addLog(`Echoed test message`);
-          } catch (error) {
-            console.error("[CLIENT-RECEIVED] Error echoing test message:", error);
-            addLog(`Failed to echo test message: ${error.message}`);
-          }
-          return;
-        }
-        
-        // Regular message
+    };
+
+    channel.onmessage = (event) => {
+      console.log(`[SYNTH] Received message:`, event.data);
+      lastMessageReceivedTime.value = Date.now();
+
+      try {
+        // Try to parse as JSON first
+        const data = JSON.parse(event.data);
+        handleJsonMessage(data);
+      } catch (e) {
+        // If not JSON, treat as a regular message
         addLog(`Received: ${event.data}`);
       }
+    };
+  };
+
+  // Handle JSON messages
+  const handleJsonMessage = (data: any) => {
+    // Handle synth parameter updates
+    if (data.type === "synth_param") {
+      handleSynthParamUpdate(data.param, data.value);
+    } 
+    // Handle ping requests
+    else if (data.type === "ping") {
+      sendPong(data.timestamp);
+    } 
+    // Handle verification ping responses (pong)
+    else if (data.type === "verification_pong") {
+      handleVerificationPong(data);
     }
-    
-    // Send ICE candidates to the other peer
-    peerConnection.onicecandidate = (event) => {
-      if (event.candidate && socket.value) {
-        socket.value.send(JSON.stringify({
-          type: 'ice-candidate',
-          target: targetId.value,
-          data: event.candidate
-        }))
+    // Handle verification ping requests (respond with pong)
+    else if (data.type === "verification_ping") {
+      // Respond with a verification pong
+      if (dataChannel.value && dataChannel.value.readyState === "open") {
+        dataChannel.value.send(JSON.stringify({
+          type: "verification_pong",
+          pingId: data.pingId,
+          timestamp: Date.now(),
+          originalTimestamp: data.timestamp,
+          respondingClientId: id.value
+        }));
       }
     }
-    
-    // Create offer
-    peerConnection.createOffer()
-      .then(offer => peerConnection.setLocalDescription(offer))
-      .then(() => {
-        if (socket.value) {
-          socket.value.send(JSON.stringify({
-            type: 'offer',
-            target: targetId.value,
-            data: peerConnection.localDescription
-          }))
-          addLog('Sent offer')
-        }
-      })
-      .catch(error => addLog(`Error creating offer: ${error}`))
-  }
-  
-  // Send a message through the data channel
-  const sendMessage = () => {
-    if (!dataChannel.value || dataChannel.value.readyState !== 'open') {
-      addLog('Data channel not open')
-      return
+    // Handle regular messages
+    else {
+      addLog(`Received: ${JSON.stringify(data)}`);
     }
-    
-    dataChannel.value.send(message.value)
-    addLog(`Sent: ${message.value}`)
-    message.value = ''
-  }
-  
-  // Disconnect and clean up the connection
-  const disconnect = () => {
+  };
+
+  // Handle synth parameter updates
+  const handleSynthParamUpdate = (param: string, value: any) => {
+    switch (param) {
+      case "oscillatorEnabled":
+        if (audioContext && gainNode) {
+          if (!audioEnabled.value) {
+            // Initialize audio if not already done
+            initAudio();
+          }
+          
+          // Just control gain to enable/disable sound
+          if (value) {
+            // Unmute by setting gain to normal value
+            gainNode.gain.value = 0.1; // Default volume
+            addLog("Note on - gain unmuted");
+          } else {
+            // Mute by setting gain to 0
+            gainNode.gain.value = 0;
+            addLog("Note off - gain muted");
+          }
+        }
+        break;
+      case "frequency":
+        if (oscillator) {
+          oscillator.frequency.value = value;
+        }
+        break;
+      case "waveform":
+        if (oscillator) {
+          oscillator.type = value;
+        }
+        break;
+      case "volume":
+        if (gainNode && audioEnabled.value) {
+          // Only update gain if oscillator is enabled
+          gainNode.gain.value = value;
+        }
+        break;
+      case "detune":
+        if (oscillator) {
+          oscillator.detune.value = value;
+        }
+        break;
+    }
+  };
+
+  // Send a pong response to a ping
+  const sendPong = (timestamp: number) => {
+    if (dataChannel.value && dataChannel.value.readyState === "open") {
+      const pongMessage = {
+        type: "pong",
+        originalTimestamp: timestamp,
+        timestamp: Date.now(),
+      };
+      dataChannel.value.send(JSON.stringify(pongMessage));
+    }
+  };
+
+  // Clean up the existing WebRTC connection
+  const cleanupConnection = () => {
+    // Clean up data channel
     if (dataChannel.value) {
-      dataChannel.value.close()
-      dataChannel.value = null
+      try {
+        dataChannel.value.close();
+      } catch (e) {
+        console.error("[SYNTH] Error closing data channel:", e);
+      }
+      dataChannel.value = null;
     }
-    
+
+    // Clean up peer connection
     if (connection.value) {
-      connection.value.close()
-      connection.value = null
+      try {
+        connection.value.close();
+      } catch (e) {
+        console.error("[SYNTH] Error closing peer connection:", e);
+      }
+      connection.value = null;
     }
-    
-    // Close the websocket cleanly
-    if (socket.value && socket.value.readyState === WebSocket.OPEN) {
-      // We'll set up a new socket after disconnecting
-      const oldSocket = socket.value
-      socket.value = null
-      
-      // Close the socket properly
-      oldSocket.close(1000, "User initiated disconnect")
-      
-      // Reconnect to signaling server with a new WebSocket
-      setTimeout(connectWebSocket, 500)
-    }
-    
-    connected.value = false
-    targetId.value = ""
-    autoConnectAttempted.value = false
-    addLog('Disconnected')
-  }
-  
+
+    // Reset connection state
+    connected.value = false;
+    connectionHealthy.value = false;
+    connectedControllerId.value = null;
+  };
+
   // Connect to the WebSocket signaling server
-  const connectWebSocket = () => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const ws = new WebSocket(`${protocol}//${window.location.host}/api/signal`)
-    socket.value = ws
-    
-    ws.onopen = () => {
-      addLog('Signaling server connected')
-      ws.send(JSON.stringify({ type: 'register', id: id.value }))
-      
-      // Start sending heartbeats to keep the connection alive
-      setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ 
-            type: 'heartbeat',
-            id: id.value
-          }))
-        }
-      }, 30000) // Send heartbeat every 30 seconds
+  const connectWebSocket = async () => {
+    if (socket.value && socket.value.readyState !== WebSocket.CLOSED) {
+      addLog("WebSocket already connected or connecting");
+      return;
     }
-    
-    ws.onclose = () => {
-      addLog('Signaling server disconnected')
-      
-      // Don't try to reconnect if we deliberately disconnected
-      if (connection.value || !socket.value) {
-        setTimeout(connectWebSocket, 1000) // Reconnect
+
+    // Check if we have a client ID
+    if (!idLoaded.value) {
+      const success = await requestClientId();
+      if (!success) {
+        addLog("Failed to get client ID, cannot connect to signaling server");
+        return;
       }
     }
-    
+
+    wsReconnecting.value = true;
+
+    // Get WebSocket URL from the current location
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${protocol}//${window.location.host}/api/signal`;
+
+    addLog(`Connecting to signaling server at ${wsUrl}...`);
+    const ws = new WebSocket(wsUrl);
+    socket.value = ws;
+
+    ws.onopen = () => {
+      addLog("Connected to signaling server");
+      wsConnected.value = true;
+      wsReconnecting.value = false;
+      wsReconnectAttempts.value = 0;
+
+      // Register with the signaling server
+      ws.send(JSON.stringify({
+        type: "register",
+        id: id.value,
+        clientType: idType.value,
+      }));
+      addLog(`Registering as ${idType.value} client with ID ${id.value}`);
+    };
+
+    ws.onclose = (event) => {
+      addLog(
+        `WebSocket disconnected (${event.code}${
+          event.reason ? ": " + event.reason : ""
+        })`,
+      );
+      wsConnected.value = false;
+
+      // Don't try to reconnect if we deliberately closed the connection
+      if (socket.value) {
+        wsReconnecting.value = true;
+        wsReconnectAttempts.value += 1;
+
+        // Use exponential backoff for reconnection
+        const delay = Math.min(
+          1000 * Math.pow(1.5, wsReconnectAttempts.value),
+          10000,
+        );
+        setTimeout(connectWebSocket, delay);
+      } else {
+        wsReconnecting.value = false;
+      }
+    };
+
     ws.onerror = (error) => {
-      addLog(`WebSocket error. Will try to reconnect...`)
-      console.error("WebSocket error:", error)
-    }
-    
+      console.error("[SYNTH] WebSocket error:", error);
+      addLog("WebSocket error. Will try to reconnect...");
+    };
+
     ws.onmessage = (event) => {
       try {
-        const message = JSON.parse(event.data)
-        
+        const message = JSON.parse(event.data);
+
         switch (message.type) {
-          case 'active-controller':
-            // Server is notifying us about an active controller
-            const controllerId = message.controllerId
-            activeController.value = controllerId
-            
-            if (controllerId) {
-              addLog(`Active controller detected: ${controllerId}`)
-              
-              // Auto-connect to controller if not already connected and not already attempted
-              if (!connected.value && !autoConnectAttempted.value) {
-                addLog('Auto-connecting to controller...')
-                autoConnectAttempted.value = true
-                targetId.value = controllerId
-                // Use setTimeout to ensure this happens after all state updates
-                setTimeout(() => connect(), 500)
-              }
-            } else {
-              addLog('No active controller')
-              // Reset auto-connect flag when controller deactivates
-              autoConnectAttempted.value = false
+          case "registration-confirmed":
+            addLog(
+              `Registered with signaling server${
+                message.isReconnection ? " (reconnected)" : ""
+              }`,
+            );
+
+            // Request current active controller on registration
+            if (socket.value && socket.value.readyState === WebSocket.OPEN) {
+              socket.value.send(JSON.stringify({
+                type: "request-active-controller",
+              }));
             }
-            break
-            
-          case 'offer':
-            // Handle offer asynchronously
-            handleOffer(message).catch(error => {
-              console.error('Error handling offer:', error);
-              addLog(`Error handling offer: ${error.message}`);
-            })
-            break
-            
-          case 'answer':
-            handleAnswer(message)
-            break
-            
-          case 'ice-candidate':
-            handleIceCandidate(message)
-            break
-            
+            break;
+
+          case "active-controller":
+            handleActiveControllerUpdate(message.controllerId);
+            break;
+
+          case "offer":
+            handleOffer(message);
+            break;
+
+          case "answer":
+            handleAnswer(message);
+            break;
+
+          case "ice-candidate":
+            handleIceCandidate(message);
+            break;
+
           default:
-            addLog(`Unknown message type: ${message.type}`)
+            console.log("[SYNTH] Received message of type:", message.type);
         }
       } catch (error) {
-        addLog(`Error handling message: ${error}`)
+        console.error("[SYNTH] Error parsing WebSocket message:", error);
+        addLog(`Error handling WebSocket message: ${error.message}`);
       }
-    }
-  }
-  
-  // Handle an incoming offer
-  const handleOffer = async (message: any) => {
-    if (!connection.value) {
-      // Get ICE servers from Twilio
-      const iceServers = await fetchIceServers();
-      console.log('Using ICE servers (handleOffer):', iceServers);
-      
-      const peerConnection = new RTCPeerConnection({
-        iceServers
-      })
-      connection.value = peerConnection
-      
-      peerConnection.onicecandidate = (event) => {
-        if (event.candidate && socket.value) {
-          socket.value.send(JSON.stringify({
-            type: 'ice-candidate',
-            target: message.source,
-            data: event.candidate
-          }))
-        }
-      }
-      
-      peerConnection.ondatachannel = (event) => {
-        const receivedChannel = event.channel
-        dataChannel.value = receivedChannel
-        
-        receivedChannel.onopen = () => {
-          addLog('Data channel opened (received)')
-          connected.value = true
-          
-          // Send current synth parameters to the controller
-          if (audioEnabled.value) {
-            try {
-              // Send frequency
-              receivedChannel.send(JSON.stringify({
-                type: 'synth_param',
-                param: 'frequency',
-                value: frequency.value
-              }));
-              
-              // Send waveform
-              receivedChannel.send(JSON.stringify({
-                type: 'synth_param',
-                param: 'waveform',
-                value: waveform.value
-              }));
-              
-              // Send volume
-              receivedChannel.send(JSON.stringify({
-                type: 'synth_param',
-                param: 'volume',
-                value: volume.value
-              }));
-              
-              // Send audio state
-              receivedChannel.send(JSON.stringify({
-                type: 'audio_state',
-                audioEnabled: audioEnabled.value,
-                audioState: audioState.value
-              }));
-              
-              addLog('Sent synth parameters and audio state to controller');
-            } catch (error) {
-              console.error("Error sending synth parameters:", error);
-            }
-          } else {
-            // Even if audio is not enabled, send the audio state
-            try {
-              receivedChannel.send(JSON.stringify({
-                type: 'audio_state',
-                audioEnabled: false,
-                audioState: 'disabled'
-              }));
-              addLog('Sent audio state to controller (audio not enabled)');
-            } catch (error) {
-              console.error("Error sending audio state:", error);
-            }
-          }
-        }
-        
-        receivedChannel.onclose = () => {
-          addLog('Data channel closed (received)')
-          connected.value = false
-        }
-        
-        receivedChannel.onmessage = (event) => {
-          console.log("[CLIENT-ALT] Received message:", event.data);
-          
-          // Try to parse JSON messages
-          if (typeof event.data === 'string' && event.data.startsWith('{')) {
-            try {
-              const message = JSON.parse(event.data);
-              
-              // Handle synth parameter update messages
-              if (message.type === 'synth_param') {
-                switch (message.param) {
-                  case 'frequency':
-                    updateFrequency(Number(message.value));
-                    addLog(`Frequency updated to ${message.value}Hz by controller`);
-                    break;
-                  case 'waveform':
-                    updateWaveform(message.value as OscillatorType);
-                    addLog(`Waveform updated to ${message.value} by controller`);
-                    break;
-                  case 'volume':
-                    updateVolume(Number(message.value));
-                    addLog(`Volume updated to ${message.value} by controller`);
-                    break;
-                  case 'oscillatorEnabled':
-                    console.log(`[SYNTH] Received oscillatorEnabled parameter: ${message.value}, type: ${typeof message.value}`);
-                    // Convert various types to boolean properly
-                    const enabled = message.value === true || message.value === 'true' || message.value === 1;
-                    console.log(`[SYNTH] Converted value to boolean: ${enabled}`);
-                    toggleOscillator(enabled);
-                    addLog(`Oscillator ${enabled ? 'enabled' : 'disabled'} by controller`);
-                    break;
-                  case 'note':
-                    updateNote(message.value as string);
-                    addLog(`Note changed to ${message.value} by controller`);
-                    break;
-                  case 'detune':
-                    updateDetune(Number(message.value));
-                    addLog(`Detune set to ${message.value} cents by controller`);
-                    break;
-                  default:
-                    addLog(`Unknown synth parameter: ${message.param}`);
-                }
-                return;
-              }
-            } catch (error) {
-              console.error("Error parsing JSON message:", error);
-              // Continue with non-JSON message handling
-            }
-          }
-          
-          // Regular message
-          addLog(`Received: ${event.data}`);
-        }
-      }
-      
-      peerConnection.setRemoteDescription(new RTCSessionDescription(message.data))
-        .then(() => peerConnection.createAnswer())
-        .then(answer => peerConnection.setLocalDescription(answer))
-        .then(() => {
-          if (socket.value) {
-            socket.value.send(JSON.stringify({
-              type: 'answer',
-              target: message.source,
-              data: peerConnection.localDescription
-            }))
-            targetId.value = message.source
-            addLog('Sent answer')
-          }
-        })
-        .catch(error => addLog(`Error creating answer: ${error}`))
-    }
-  }
-  
-  // Handle an incoming answer
-  const handleAnswer = (message: any) => {
-    if (connection.value) {
-      connection.value.setRemoteDescription(new RTCSessionDescription(message.data))
-        .then(() => addLog('Remote description set'))
-        .catch(error => addLog(`Error setting remote description: ${error}`))
-    }
-  }
-  
-  // Handle an incoming ICE candidate
-  const handleIceCandidate = (message: any) => {
-    if (connection.value) {
-      connection.value.addIceCandidate(new RTCIceCandidate(message.data))
-        .then(() => addLog('Added ICE candidate'))
-        .catch(error => addLog(`Error adding ICE candidate: ${error}`))
-    }
-  }
-  
-  // Send audio state to controller
-  const sendAudioState = () => {
-    if (!dataChannel.value || dataChannel.value.readyState !== 'open') {
-      return;
-    }
-    
-    try {
-      dataChannel.value.send(JSON.stringify({
-        type: 'audio_state',
-        audioEnabled: audioEnabled.value,
-        audioState: audioState.value
-      }));
-      console.log("Sent audio state update:", audioEnabled.value, audioState.value);
-    } catch (error) {
-      console.error("Error sending audio state:", error);
-    }
+    };
   };
-  
-  // Initialize audio context with user gesture
-  const initAudioContext = () => {
-    try {
-      // Create audio context if it doesn't exist
-      if (!audioContext) {
-        audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-        addLog("Audio context created");
-        
-        // Create gain node for volume control
-        gainNode = audioContext.createGain();
-        gainNode.gain.value = volume.value;
-        gainNode.connect(audioContext.destination);
-        
-        // Create oscillator if enabled
-        if (oscillatorEnabled.value) {
-          oscillator = audioContext.createOscillator();
-          oscillator.type = waveform.value;
-          oscillator.frequency.value = frequency.value;
-          oscillator.detune.value = detune.value;
-          oscillator.connect(gainNode);
-          oscillator.start();
-          
-          addLog(`Oscillator started with note ${currentNote.value} (${frequency.value}Hz) using ${waveform.value} waveform, detune: ${detune.value} cents`);
-        } else {
-          addLog("Oscillator is disabled");
+
+  // Handle receiving the active controller ID
+  const handleActiveControllerUpdate = (controllerId: string | null) => {
+    const previousController = activeController.value;
+
+    // Update active controller
+    activeController.value = controllerId;
+    lastControllerChangeTime.value = Date.now();
+
+    // Log the update
+    if (controllerId) {
+      addLog(`Active controller: ${controllerId}`);
+
+      // If we're not connected to this controller but it is available, connect
+      if (controllerId !== connectedControllerId.value && wsConnected.value) {
+        // If we were connected to a different controller, disconnect first
+        if (connected.value && connectedControllerId.value !== controllerId) {
+          addLog(
+            `Disconnecting from previous controller ${connectedControllerId.value}`,
+          );
+          cleanupConnection();
         }
-      }
-      
-      // Resume the audio context (needed for browsers that suspend by default)
-      if (audioContext.state !== "running") {
-        audioContext.resume().then(() => {
-          addLog(`Audio context resumed, state: ${audioContext.state}`);
-          audioState.value = audioContext.state;
-          sendAudioState(); // Send updated state to controller
-        }).catch(err => {
-          addLog(`Error resuming audio context: ${err.message}`);
-        });
-      } else {
-        audioState.value = audioContext.state;
-      }
-      
-      // Setup audio state change listener
-      audioContext.onstatechange = () => {
-        audioState.value = audioContext.state;
-        addLog(`Audio context state changed to: ${audioContext.state}`);
-        sendAudioState(); // Send updated state to controller
-      };
-      
-      // Mark audio as enabled and hide the button
-      audioEnabled.value = true;
-      showAudioButton.value = false;
-      
-      // Send audio state to controller if connected
-      sendAudioState();
-    } catch (error) {
-      addLog(`Error initializing audio context: ${error.message}`);
-      console.error("Audio context initialization failed:", error);
-    }
-  };
-  
-  // Update oscillator frequency
-  const updateFrequency = (newFrequency: number) => {
-    if (oscillator && audioContext) {
-      oscillator.frequency.setValueAtTime(newFrequency, audioContext.currentTime);
-      frequency.value = newFrequency;
-      
-      // Send frequency update to controller if connected
-      if (dataChannel.value && dataChannel.value.readyState === 'open') {
-        try {
-          dataChannel.value.send(JSON.stringify({
-            type: 'synth_param',
-            param: 'frequency',
-            value: newFrequency
-          }));
-        } catch (error) {
-          console.error("Error sending frequency update:", error);
-        }
-      }
-    }
-  };
-  
-  // Update oscillator waveform
-  const updateWaveform = (newWaveform: OscillatorType) => {
-    if (oscillator) {
-      oscillator.type = newWaveform;
-      waveform.value = newWaveform;
-      addLog(`Waveform changed to ${newWaveform}`);
-      
-      // Send waveform update to controller if connected
-      if (dataChannel.value && dataChannel.value.readyState === 'open') {
-        try {
-          dataChannel.value.send(JSON.stringify({
-            type: 'synth_param',
-            param: 'waveform',
-            value: newWaveform
-          }));
-        } catch (error) {
-          console.error("Error sending waveform update:", error);
-        }
-      }
-    }
-  };
-  
-  // Update volume
-  const updateVolume = (newVolume: number) => {
-    if (gainNode) {
-      gainNode.gain.value = newVolume;
-      volume.value = newVolume;
-      
-      // Send volume update to controller if connected
-      if (dataChannel.value && dataChannel.value.readyState === 'open') {
-        try {
-          dataChannel.value.send(JSON.stringify({
-            type: 'synth_param',
-            param: 'volume',
-            value: newVolume
-          }));
-        } catch (error) {
-          console.error("Error sending volume update:", error);
-        }
-      }
-    }
-  };
-  
-  // Note frequencies mapping - all semitones from A4 to A5
-  const noteFrequencies = {
-    "A4": 440.00,   // A4
-    "A#4": 466.16,  // A#4/Bb4
-    "B4": 493.88,   // B4
-    "C5": 523.25,   // C5
-    "C#5": 554.37,  // C#5/Db5
-    "D5": 587.33,   // D5
-    "D#5": 622.25,  // D#5/Eb5
-    "E5": 659.25,   // E5
-    "F5": 698.46,   // F5
-    "F#5": 739.99,  // F#5/Gb5
-    "G5": 783.99,   // G5
-    "G#5": 830.61,  // G#5/Ab5
-    "A5": 880.00    // A5
-  };
-  
-  // Update the note
-  const updateNote = (note: string) => {
-    if (note in noteFrequencies) {
-      currentNote.value = note;
-      const newFrequency = noteFrequencies[note as keyof typeof noteFrequencies];
-      
-      // Apply the base frequency (without detune)
-      frequency.value = newFrequency;
-      
-      // Update oscillator if it exists
-      if (oscillator && audioContext) {
-        oscillator.frequency.setValueAtTime(newFrequency, audioContext.currentTime);
-        
-        // Apply detune separately
-        oscillator.detune.setValueAtTime(detune.value, audioContext.currentTime);
-      }
-      
-      addLog(`Note changed to ${note} (${newFrequency}Hz)`);
-      
-      // Send note update to controller if connected
-      if (dataChannel.value && dataChannel.value.readyState === 'open') {
-        try {
-          dataChannel.value.send(JSON.stringify({
-            type: 'synth_param',
-            param: 'note',
-            value: note
-          }));
-        } catch (error) {
-          console.error("Error sending note update:", error);
-        }
-      }
-    }
-  };
-  
-  // Update detune value
-  const updateDetune = (cents: number) => {
-    detune.value = cents;
-    
-    // Update oscillator if it exists
-    if (oscillator && audioContext) {
-      oscillator.detune.setValueAtTime(cents, audioContext.currentTime);
-      addLog(`Detune set to ${cents} cents`);
-    }
-    
-    // Send detune update to controller if connected
-    if (dataChannel.value && dataChannel.value.readyState === 'open') {
-      try {
-        dataChannel.value.send(JSON.stringify({
-          type: 'synth_param',
-          param: 'detune',
-          value: cents
-        }));
-      } catch (error) {
-        console.error("Error sending detune update:", error);
-      }
-    }
-  };
-  
-  // Toggle oscillator on/off
-  const toggleOscillator = (enabled: boolean) => {
-    console.log(`[SYNTH] toggleOscillator called with enabled=${enabled}, current value=${oscillatorEnabled.value}`);
-    
-    oscillatorEnabled.value = enabled;
-    
-    if (!audioContext) {
-      console.warn("[SYNTH] Cannot toggle oscillator: audioContext is not initialized");
-      return;
-    }
-    
-    if (enabled) {
-      // Turn oscillator on
-      if (!oscillator) {
-        console.log("[SYNTH] Creating and starting new oscillator");
-        
-        // Check if gainNode exists
-        if (!gainNode) {
-          console.error("[SYNTH] Error: gainNode is not initialized!");
-          // Create it if missing
-          gainNode = audioContext.createGain();
-          gainNode.gain.value = volume.value;
-          gainNode.connect(audioContext.destination);
-          console.log("[SYNTH] Created missing gainNode");
-        }
-        
-        oscillator = audioContext.createOscillator();
-        oscillator.type = waveform.value;
-        oscillator.frequency.value = frequency.value;
-        oscillator.detune.value = detune.value;
-        
-        console.log("[SYNTH] Connecting oscillator to gainNode");
-        oscillator.connect(gainNode);
-        console.log("[SYNTH] Starting oscillator");
-        oscillator.start();
-        addLog(`Oscillator turned on: ${waveform.value} @ ${frequency.value}Hz (detune: ${detune.value} cents)`);
-      } else {
-        console.log("[SYNTH] Oscillator already exists, not creating a new one");
+
+        // Connect to the new controller
+        addLog(`Connecting to new active controller ${controllerId}`);
+        autoConnectAttempted.value = true;
+        initRTC(controllerId, false);
       }
     } else {
-      // Turn oscillator off
-      if (oscillator) {
-        console.log("[SYNTH] Stopping and disconnecting oscillator");
-        oscillator.stop();
-        oscillator.disconnect();
-        oscillator = null;
-        addLog("Oscillator turned off");
-      } else {
-        console.log("[SYNTH] No oscillator to turn off");
-      }
-    }
-    
-    // Send oscillator state to controller if connected
-    if (dataChannel.value && dataChannel.value.readyState === 'open') {
-      try {
-        dataChannel.value.send(JSON.stringify({
-          type: 'synth_param',
-          param: 'oscillatorEnabled',
-          value: enabled
-        }));
-      } catch (error) {
-        console.error("Error sending oscillator state:", error);
+      addLog("No active controller available");
+
+      // If we were connected and now there's no controller, clean up
+      if (connected.value) {
+        addLog("Disconnecting since there's no active controller");
+        cleanupConnection();
       }
     }
   };
+
+  // Handle an offer from a controller
+  const handleOffer = async (message: any) => {
+    addLog(`Received offer from ${message.source}`);
+
+    // If we have an active controller and it doesn't match the source, ignore
+    if (activeController.value && activeController.value !== message.source) {
+      addLog(`Ignoring offer from non-active controller ${message.source}`);
+      return;
+    }
+
+    // If we're already connected to this controller, ignore the offer
+    if (connected.value && connectedControllerId.value === message.source) {
+      addLog(`Already connected to ${message.source}, ignoring offer`);
+      return;
+    }
+
+    // Initialize a new connection if needed
+    if (!connection.value) {
+      await initRTC(message.source, false);
+    }
+
+    try {
+      if (connection.value) {
+        // Set remote description from the offer
+        await connection.value.setRemoteDescription(
+          new RTCSessionDescription(message.data),
+        );
+
+        // Create answer
+        const answer = await connection.value.createAnswer();
+        await connection.value.setLocalDescription(answer);
+
+        // Send answer back
+        if (socket.value && socket.value.readyState === WebSocket.OPEN) {
+          socket.value.send(JSON.stringify({
+            type: "answer",
+            target: message.source,
+            data: answer,
+          }));
+          addLog(`Sent answer to ${message.source}`);
+        } else {
+          addLog("WebSocket not connected. Cannot send answer.");
+        }
+      }
+    } catch (error) {
+      addLog(`Error handling offer: ${error.message}`);
+    }
+  };
+
+  // Handle an answer to our offer
+  const handleAnswer = async (message: any) => {
+    addLog(`Received answer from ${message.source}`);
+
+    try {
+      if (connection.value) {
+        await connection.value.setRemoteDescription(
+          new RTCSessionDescription(message.data),
+        );
+        addLog("Remote description set from answer");
+      }
+    } catch (error) {
+      addLog(`Error handling answer: ${error.message}`);
+    }
+  };
+
+  // Handle an ICE candidate
+  const handleIceCandidate = async (message: any) => {
+    try {
+      if (connection.value) {
+        await connection.value.addIceCandidate(
+          new RTCIceCandidate(message.data),
+        );
+      }
+    } catch (error) {
+      addLog(`Error adding ICE candidate: ${error.message}`);
+    }
+  };
+
+  // Attempt reconnection to the controller
+  const attemptReconnection = async () => {
+    if (!activeController.value) {
+      addLog("No active controller to reconnect to");
+      return;
+    }
+
+    if (connected.value && connectionHealthy.value) {
+      console.log("[SYNTH] Already connected, skipping reconnection");
+      return;
+    }
+
+    addLog(`Attempting reconnection to controller ${activeController.value}`);
+
+    // Initialize a new connection with reconnect flag
+    await initRTC(activeController.value, true);
+  };
+
+  // Connect to target ID (manual action)
+  const connect = async () => {
+    if (!targetId.value) {
+      addLog("Please enter a target ID");
+      return;
+    }
+
+    await initRTC(targetId.value, false);
+  };
+
+  // Disconnect
+  const disconnect = () => {
+    addLog("Disconnecting...");
+    cleanupConnection();
+  };
+
+  // Track verification pings for connection health
+  const verificationPings = new Map<string, number>();
+  const PING_TIMEOUT_MS = 5000; // 5 seconds timeout for ping responses
   
-  // Connect to the signaling server on mount and clean up on unmount
-  useEffect(() => {
-    // Connect to signaling server (but don't enable audio yet)
-    connectWebSocket();
+  // Send a verification ping to the controller
+  const sendVerificationPing = () => {
+    if (!dataChannel.value || dataChannel.value.readyState !== "open") {
+      return false;
+    }
     
-    // Cleanup function
-    return () => {
-      // Close connections
-      if (socket.value) socket.value.close();
-      if (connection.value) connection.value.close();
+    try {
+      const pingId = crypto.randomUUID().substring(0, 8);
+      const now = Date.now();
       
-      // Stop audio and clean up audio nodes
+      // Store this ping id and timestamp
+      verificationPings.set(pingId, now);
+      
+      // Send the verification ping
+      dataChannel.value.send(JSON.stringify({
+        type: "verification_ping",
+        pingId: pingId,
+        timestamp: now,
+        clientId: id.value
+      }));
+      
+      addLog(`Sent verification ping ${pingId}`);
+      
+      // Set a timeout to check if we got a response
+      setTimeout(() => {
+        if (verificationPings.has(pingId)) {
+          // No response received within timeout
+          console.log(`[SYNTH] No response to verification ping ${pingId}`);
+          verificationPings.delete(pingId);
+          connectionHealthy.value = false;
+          
+          // If we haven't gotten responses to verification pings, 
+          // that's a strong indicator we need to reconnect
+          if (connected.value && activeController.value) {
+            addLog("Connection verification failed - attempting reconnection");
+            attemptReconnection();
+          }
+        }
+      }, PING_TIMEOUT_MS);
+      
+      return true;
+    } catch (error) {
+      console.error("[SYNTH] Error sending verification ping:", error);
+      return false;
+    }
+  };
+  
+  // Handle verification pong response
+  const handleVerificationPong = (data: any) => {
+    const { pingId, timestamp } = data;
+    
+    if (verificationPings.has(pingId)) {
+      // Calculate round-trip time
+      const rtt = Date.now() - verificationPings.get(pingId);
+      addLog(`Received verification pong for ${pingId} (RTT: ${rtt}ms)`);
+      
+      // Remove this ping from tracking
+      verificationPings.delete(pingId);
+      
+      // Update connection health - this is a strong positive signal
+      connectionHealthy.value = true;
+      lastMessageReceivedTime.value = Date.now();
+    }
+  };
+
+  // Start monitoring connection health
+  const startConnectionMonitoring = () => {
+    // Clear any existing interval
+    if (heartbeatInterval.value !== null) {
+      clearInterval(heartbeatInterval.value);
+    }
+
+    // Start a new interval to check connection health
+    heartbeatInterval.value = setInterval(() => {
+      // If we're not connected, don't bother checking health
+      if (!connected.value) return;
+
+      const now = Date.now();
+
+      // Check if we've received a message recently
+      const messageAge = now - lastMessageReceivedTime.value;
+      const isMessageRecent = messageAge < 30000; // 30 seconds
+
+      // Check if ICE connection is good
+      const isIceHealthy = iceConnectionState.value === "connected" ||
+        iceConnectionState.value === "completed";
+
+      // Update overall health status based on message recency and ICE state
+      connectionHealthy.value = isIceHealthy && isMessageRecent;
+
+      // Send a verification ping every other heartbeat interval
+      if (now % 20000 < 10000) {
+        sendVerificationPing();
+      } 
+      // On alternate intervals, send a regular heartbeat
+      else if (dataChannel.value && dataChannel.value.readyState === "open") {
+        try {
+          dataChannel.value.send(JSON.stringify({
+            type: "heartbeat",
+            timestamp: now,
+          }));
+        } catch (error) {
+          console.error("[SYNTH] Error sending heartbeat:", error);
+        }
+      }
+
+      // If connection is unhealthy and attempts to validate have failed, try reconnection
+      if (!connectionHealthy.value && activeController.value) {
+        attemptReconnection();
+      }
+    }, 10000); // Check every 10 seconds
+  };
+
+  // Start audio - now just initializes audio and unmutes gain
+  const startAudio = () => {
+    // Initialize if not already done
+    if (!audioContext) {
+      initAudio();
+    } else if (audioContext.state === "suspended") {
+      audioContext.resume();
+      audioState.value = audioContext.state;
+    }
+    
+    // Unmute gain to hear sound
+    if (gainNode) {
+      gainNode.gain.value = 0.1; // Default volume
+    }
+    
+    // Send audio status to controller
+    sendAudioStatus();
+  };
+
+  // Stop audio - now just mutes gain without stopping oscillator
+  const stopAudio = () => {
+    if (gainNode) {
+      // Just mute the gain without stopping oscillator
+      gainNode.gain.value = 0;
+      addLog("Audio muted (oscillator still running)");
+      
+      // Send audio status to controller
+      sendAudioStatus();
+    }
+  };
+
+  // Initialize audio context
+  const initAudio = () => {
+    try {
+      // Initialize audio context if not already created
+      if (!audioContext) {
+        audioContext =
+          new (window.AudioContext || (window as any).webkitAudioContext)();
+        
+        // Create the gain node (initially muted)
+        gainNode = audioContext.createGain();
+        gainNode.gain.value = 0; // Start muted
+        gainNode.connect(audioContext.destination);
+        
+        // Create and start a single oscillator that runs continuously
+        oscillator = audioContext.createOscillator();
+        oscillator.type = "sine"; // Default waveform
+        oscillator.frequency.value = 440; // Default frequency (A4)
+        oscillator.connect(gainNode);
+        
+        // Start the oscillator immediately and let it run continuously
+        // We'll control sound with the gain node
+        oscillator.start();
+        
+        audioState.value = audioContext.state;
+        addLog(`Audio initialized and oscillator started (${audioState.value})`);
+      }
+      
+      // Resume audio context if needed
+      if (audioContext.state === "suspended") {
+        audioContext.resume();
+        audioState.value = audioContext.state;
+        addLog(`Audio context resumed (${audioState.value})`);
+      }
+      
+      audioEnabled.value = true;
+
+      // Hide the initial audio button after initialization
+      showAudioButton.value = false;
+    } catch (e) {
+      console.error("[SYNTH] Error initializing audio:", e);
+      addLog(`Error initializing audio: ${e.message}`);
+    }
+  };
+
+  // Resume audio context
+  const resumeAudio = async () => {
+    if (audioContext && audioContext.state === "suspended") {
+      try {
+        await audioContext.resume();
+        audioState.value = audioContext.state;
+        showResumeAudioButton.value = false;
+        addLog(`Audio resumed (${audioContext.state})`);
+
+        // Send updated audio status to controller
+        sendAudioStatus();
+      } catch (e) {
+        console.error("[SYNTH] Error resuming audio context:", e);
+        addLog(`Error resuming audio: ${e.message}`);
+      }
+    }
+  };
+
+  // Send audio status to controller
+  const sendAudioStatus = () => {
+    if (dataChannel.value && dataChannel.value.readyState === "open") {
+      try {
+        dataChannel.value.send(JSON.stringify({
+          type: "audio_status",
+          enabled: audioEnabled.value,
+          state: audioContext ? audioContext.state : "none",
+          noteOn: gainNode ? gainNode.gain.value > 0 : false,
+        }));
+      } catch (error) {
+        console.error("[SYNTH] Error sending audio status:", error);
+      }
+    }
+  };
+
+  // Send a message to the controller
+  const sendMessage = () => {
+    if (!dataChannel.value || dataChannel.value.readyState !== "open") {
+      addLog("Data channel not open");
+      return;
+    }
+
+    dataChannel.value.send(message.value);
+    addLog(`Sent: ${message.value}`);
+    message.value = "";
+  };
+
+  // Initialize when component mounts
+  useEffect(() => {
+    console.log("[SYNTH] Component mounted");
+
+    // Request a client ID
+    (async () => {
+      const success = await requestClientId();
+      if (success) {
+        // Connect to WebSocket signaling server after getting ID
+        await connectWebSocket();
+      }
+    })();
+
+    // Add event listener for visibility change to handle browser tab switching
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    // Cleanup on unmount
+    return () => {
+      cleanupConnection();
+
+      // Close WebSocket
+      if (socket.value) {
+        socket.value.close();
+        socket.value = null;
+      }
+
+      // Clean up audio
       if (oscillator) {
         try {
           oscillator.stop();
-          oscillator.disconnect();
-          console.log("Oscillator stopped and disconnected");
-        } catch (err) {
-          console.error("Error stopping oscillator:", err);
+        } catch (e) {
+          // Ignore errors when stopping already stopped oscillator
         }
       }
-      
-      if (gainNode) {
-        try {
-          gainNode.disconnect();
-          console.log("Gain node disconnected");
-        } catch (err) {
-          console.error("Error disconnecting gain node:", err);
-        }
+
+      // Stop intervals
+      if (heartbeatInterval.value !== null) {
+        clearInterval(heartbeatInterval.value);
       }
-      
-      // Close audio context
-      if (audioContext && audioEnabled.value) {
-        audioContext.close().then(() => {
-          addLog("Audio context closed");
-        }).catch(err => {
-          console.error("Error closing audio context:", err);
-        });
+
+      if (reconnectAttemptInterval.value !== null) {
+        clearInterval(reconnectAttemptInterval.value);
       }
+
+      // Remove visibility change listener
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [])
-  
-  // Handle pressing Enter in the message input
-  const handleKeyDown = (e: KeyboardEvent) => {
-    if (e.key === 'Enter' && connected.value && message.value.trim()) {
-      sendMessage()
+  }, []);
+
+  // Handle browser tab visibility changes
+  const handleVisibilityChange = () => {
+    if (document.visibilityState === "visible") {
+      console.log("[SYNTH] Tab is now visible, checking connection");
+
+      // If WebSocket is closed/closing but we think it's connected, reconnect
+      if (
+        socket.value &&
+        (socket.value.readyState === WebSocket.CLOSED ||
+          socket.value.readyState === WebSocket.CLOSING) &&
+        wsConnected.value
+      ) {
+        console.log("[SYNTH] WebSocket appears disconnected, reconnecting");
+        wsConnected.value = false;
+        connectWebSocket();
+      }
+
+      // Check if WebRTC connection is still healthy
+      if (
+        connected.value && !connectionHealthy.value && activeController.value
+      ) {
+        console.log(
+          "[SYNTH] Connection unhealthy after visibility change, attempting reconnection",
+        );
+        attemptReconnection();
+      }
     }
-  }
+  };
 
   return (
     <div class="container">
-      {showAudioButton.value ? (
-        // Show the Enable Audio button if audio is not yet enabled
-        <div class="audio-enable">
-          <h1>WebRTC Synth</h1>
-          <p>Click the button below to enable audio.</p>
-          <button 
-            onClick={initAudioContext} 
-            class="audio-button"
-          >
-            Enable Audio
-          </button>
-          
-          {/* Show info about controller status in the background */}
-          {activeController.value && (
-            <div class="background-info">
-              <p>Controller available - will auto-connect once audio is enabled.</p>
+      <h1>WebRTC Synth</h1>
+
+      <div class="control-section">
+        <div class="id-section">
+          <p>
+            Your Client ID:{" "}
+            <span class="client-id">{id.value || "Loading..."}</span>
+          </p>
+
+          {/* Controller info */}
+          <div class="controller-info">
+            <p>
+              Active Controller: {activeController.value
+                ? (
+                  <span class="active-controller">
+                    {activeController.value}
+                  </span>
+                )
+                : <span class="no-controller">None</span>}
+            </p>
+
+            <div class="connection-status">
+              {connected.value
+                ? (
+                  <span class="status-connected">
+                    Connected to {connectedControllerId.value}
+                    {connectionHealthy.value ? " (Healthy)" : " (Unstable)"}
+                  </span>
+                )
+                : <span class="status-disconnected">Disconnected</span>}
+            </div>
+          </div>
+        </div>
+
+        {/* Connection and chat sections removed for cleaner interface */}
+
+        <div class="audio-controls">
+          <h3>Audio Controls</h3>
+
+          {/* Initial audio button */}
+          {showAudioButton.value && (
+            <button onClick={initAudio} class="audio-button">
+              Enable Audio
+            </button>
+          )}
+
+          {/* Resume audio button (when suspended) */}
+          {(!showAudioButton.value && showResumeAudioButton.value) && (
+            <button onClick={resumeAudio} class="audio-button">
+              Resume Audio
+            </button>
+          )}
+
+          {/* Audio status display */}
+          {!showAudioButton.value && (
+            <div class="audio-status">
+              <p>
+                Audio Context: {audioContext ? (
+                  <span class={audioState.value === "running" ? "audio-enabled" : "audio-suspended"}>
+                    {audioState.value}
+                  </span>
+                ) : (
+                  <span class="audio-disabled">Not initialized</span>
+                )}
+              </p>
+              
+              <p>
+                Note: {gainNode && gainNode.gain.value > 0 ? (
+                  <span class="audio-enabled">Playing</span>
+                ) : (
+                  <span class="audio-note-off">Silent</span>
+                )}
+              </p>
+
+              <div class="audio-buttons">
+                <button
+                  onClick={initAudio}
+                  disabled={audioEnabled.value}
+                  class="audio-control-button"
+                >
+                  Initialize Audio
+                </button>
+                {audioContext && audioContext.state === "suspended" && (
+                  <button
+                    onClick={resumeAudio}
+                    class="audio-control-button"
+                  >
+                    Resume Audio
+                  </button>
+                )}
+              </div>
             </div>
           )}
         </div>
-      ) : (
-        // Show the full synth UI after audio is enabled
-        <div class="synth-ui">
-          <h1>WebRTC Synth</h1>
-          
-          <div class="status-bar">
-            <div>
-              <span class="id-display">ID: {id.value}</span>
-              <span class={`connection-status ${connected.value ? 'status-connected' : 'status-disconnected'}`}>
-                {connected.value ? 'Connected' : 'Disconnected'}
-              </span>
-              <span class={`audio-status audio-${audioState.value}`}>
-                Audio: {audioState.value}
-              </span>
-            </div>
-            
-            {activeController.value && (
-              <div class="controller-info">
-                <span class="controller-badge">
-                  {connected.value && targetId.value === activeController.value 
-                    ? 'Connected to Controller' 
-                    : 'Controller Available'}
-                </span>
-              </div>
-            )}
-          </div>
-          
-          <div class="synth-status">
-            <div class="synth-info">
-              <h3>Synth Status</h3>
-              <div class="param-display">
-                <p>Oscillator: <span class={oscillatorEnabled.value ? 'status-on' : 'status-off'}>
-                  {oscillatorEnabled.value ? 'ON' : 'OFF'}
-                </span></p>
-                <p>Note: <span class="param-value">{currentNote.value}</span></p>
-                <p>Waveform: <span class="param-value">{waveform.value}</span></p>
-                <p>Detune: <span class="param-value">{detune.value > 0 ? `+${detune.value}` : detune.value} ¢</span></p>
-                <p>Volume: <span class="param-value">{Math.round(volume.value * 100)}%</span></p>
-              </div>
-              <p class="control-info">Synth controls available in controller interface</p>
-            </div>
-          </div>
-          
-          <div class="connection-info">
-            <input
-              type="text"
-              placeholder="Enter target ID"
-              value={targetId.value}
-              onInput={(e) => targetId.value = e.currentTarget.value}
-              disabled={connected.value}
-            />
-            {connected.value ? (
-              <button onClick={disconnect} class="disconnect-button">
-                Disconnect
-              </button>
-            ) : (
-              <button onClick={connect} disabled={!targetId.value.trim()}>
+      </div>
+
+      <div class="status-section">
+        <div class="connection-info">
+          <h3>Connection Info</h3>
+
+          {/* WebSocket status */}
+          <div class="ws-status">
+            <span
+              class={`status-indicator ${
+                wsConnected.value ? "connected" : "disconnected"
+              }`}
+            >
+              Signaling Server: {wsConnected.value
+                ? "Connected"
+                : (wsReconnecting.value ? "Reconnecting..." : "Disconnected")}
+            </span>
+
+            {!wsConnected.value && (
+              <button
+                onClick={connectWebSocket}
+                disabled={wsReconnecting.value}
+                class="reconnect-button"
+              >
                 Connect
               </button>
             )}
           </div>
-          
-          <div class="message-area">
-            <input
-              type="text"
-              placeholder="Type a message"
-              value={message.value}
-              onInput={(e) => message.value = e.currentTarget.value}
-              onKeyDown={handleKeyDown}
-              disabled={!connected.value}
-            />
-            <button onClick={sendMessage} disabled={!connected.value || !message.value.trim()}>
-              Send
-            </button>
+
+          {/* WebRTC status */}
+          <div class="rtc-status">
+            <span
+              class={`status-indicator ${
+                connected.value
+                  ? (connectionHealthy.value ? "healthy" : "unhealthy")
+                  : "disconnected"
+              }`}
+            >
+              WebRTC: {connected.value
+                ? (connectionHealthy.value
+                  ? "Connected"
+                  : "Connected (Unstable)")
+                : "Disconnected"}
+            </span>
+
+            {activeController.value && !connected.value && (
+              <button
+                onClick={attemptReconnection}
+                class="reconnect-button"
+              >
+                Reconnect
+              </button>
+            )}
           </div>
-          
-          <div class="log">
-            <h3>Connection Log</h3>
-            <ul>
-              {logs.value.map((log, index) => (
-                <li key={index}>{log}</li>
-              ))}
-            </ul>
+
+          {/* ICE state */}
+          <div class="ice-status">
+            <span class="status-detail">
+              ICE State: {iceConnectionState.value}
+            </span>
           </div>
         </div>
-      )}
+      </div>
+
+      <div class="log-section">
+        <h3>Log</h3>
+        <div class="log">
+          {logs.value.map((log, index) => (
+            <div key={index} class="log-entry">
+              {log}
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
-  )
+  );
 }
