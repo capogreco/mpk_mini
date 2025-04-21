@@ -4,7 +4,11 @@
 
 import * as $_404 from "./routes/_404.tsx";
 import * as $_app from "./routes/_app.tsx";
+import * as $api_client_id from "./routes/api/client-id.ts";
+import * as $api_controller_clear from "./routes/api/controller/clear.ts";
 import * as $api_controller_lock from "./routes/api/controller/lock.ts";
+import * as $api_controller_params from "./routes/api/controller/params.ts";
+import * as $api_controller_status from "./routes/api/controller/status.ts";
 import * as $api_joke from "./routes/api/joke.ts";
 import * as $api_signal from "./routes/api/signal.ts";
 import * as $api_twilio_ice from "./routes/api/twilio-ice.ts";
@@ -23,7 +27,11 @@ const manifest = {
   routes: {
     "./routes/_404.tsx": $_404,
     "./routes/_app.tsx": $_app,
+    "./routes/api/client-id.ts": $api_client_id,
+    "./routes/api/controller/clear.ts": $api_controller_clear,
     "./routes/api/controller/lock.ts": $api_controller_lock,
+    "./routes/api/controller/params.ts": $api_controller_params,
+    "./routes/api/controller/status.ts": $api_controller_status,
     "./routes/api/joke.ts": $api_joke,
     "./routes/api/signal.ts": $api_signal,
     "./routes/api/twilio-ice.ts": $api_twilio_ice,
