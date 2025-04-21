@@ -84,6 +84,8 @@ interface SynthParams {
   portamento: number;
   filterCutoff: number;
   filterResonance: number;
+  attackTime: number;
+  releaseTime: number;
 }
 
 // Default synth parameters
@@ -96,6 +98,8 @@ const defaultSynthParams: SynthParams = {
   portamento: 0,
   filterCutoff: 2000, // Default cutoff at 2kHz
   filterResonance: 0.5, // Moderate resonance
+  attackTime: 0.01, // 10ms attack by default (quick attack)
+  releaseTime: 0.1, // 100ms release by default (short release)
 };
 
 // Note frequencies mapping - all semitones from A4 to A5
@@ -312,7 +316,7 @@ function SynthControls(
             </div>
           </div>
         </div>
-        
+
         {/* Portamento Knob */}
         <div className="control-group-compact">
           <label>Portamento</label>
@@ -331,7 +335,10 @@ function SynthControls(
                   const normalizedChange = deltaY / 100;
                   const newNormalized = Math.max(
                     0,
-                    Math.min(1, (startPortamento / 12) ** 0.25 + normalizedChange),
+                    Math.min(
+                      1,
+                      (startPortamento / 12) ** 0.25 + normalizedChange,
+                    ),
                   );
                   // Apply exponential curve for fine control
                   const newPortamento = Math.pow(newNormalized, 4) * 12;
@@ -350,17 +357,19 @@ function SynthControls(
               }}
               onDoubleClick={() => onParamChange("portamento", 0)} // Double click to reset to 0
               style={{
-                "--rotation": `${Math.pow(params.portamento / 12, 0.25) * 270 - 135}deg`,
+                "--rotation": `${
+                  Math.pow(params.portamento / 12, 0.25) * 270 - 135
+                }deg`,
               } as any}
             />
             <div className="knob-value knob-value-compact">
-              {params.portamento < 0.1 
-                ? Math.round(params.portamento * 1000) + "ms" 
+              {params.portamento < 0.1
+                ? Math.round(params.portamento * 1000) + "ms"
                 : params.portamento.toFixed(2) + "s"}
             </div>
           </div>
         </div>
-        
+
         {/* Filter Cutoff Knob */}
         <div className="control-group-compact">
           <label>Filter Cutoff</label>
@@ -371,7 +380,8 @@ function SynthControls(
                 // Initial Y position
                 const startY = startEvent.clientY;
                 // Convert to log scale for calculations
-                const startLogCutoff = Math.log(params.filterCutoff / 20) / Math.log(1000);
+                const startLogCutoff = Math.log(params.filterCutoff / 20) /
+                  Math.log(1000);
 
                 // Function to handle mouse movement
                 const handleMouseMove = (moveEvent: MouseEvent) => {
@@ -400,17 +410,20 @@ function SynthControls(
               }}
               onDoubleClick={() => onParamChange("filterCutoff", 2000)} // Double click to reset
               style={{
-                "--rotation": `${(Math.log(params.filterCutoff / 20) / Math.log(1000)) * 270 - 135}deg`,
+                "--rotation": `${
+                  (Math.log(params.filterCutoff / 20) / Math.log(1000)) * 270 -
+                  135
+                }deg`,
               } as any}
             />
             <div className="knob-value knob-value-compact">
-              {params.filterCutoff >= 1000 
-                ? (params.filterCutoff / 1000).toFixed(1) + "kHz" 
+              {params.filterCutoff >= 1000
+                ? (params.filterCutoff / 1000).toFixed(1) + "kHz"
                 : Math.round(params.filterCutoff) + "Hz"}
             </div>
           </div>
         </div>
-        
+
         {/* Filter Resonance Knob */}
         <div className="control-group-compact">
           <label>Resonance</label>
@@ -421,7 +434,9 @@ function SynthControls(
                 // Initial Y position
                 const startY = startEvent.clientY;
                 // Convert from 0.1-20 range to 0-1 for calculations
-                const startNormalized = Math.sqrt((params.filterResonance - 0.1) / 19.9);
+                const startNormalized = Math.sqrt(
+                  (params.filterResonance - 0.1) / 19.9,
+                );
 
                 // Function to handle mouse movement
                 const handleMouseMove = (moveEvent: MouseEvent) => {
@@ -450,7 +465,9 @@ function SynthControls(
               }}
               onDoubleClick={() => onParamChange("filterResonance", 0.5)} // Double click to reset
               style={{
-                "--rotation": `${(Math.sqrt((params.filterResonance - 0.1) / 19.9)) * 270 - 135}deg`,
+                "--rotation": `${
+                  (Math.sqrt((params.filterResonance - 0.1) / 19.9)) * 270 - 135
+                }deg`,
               } as any}
             />
             <div className="knob-value knob-value-compact">
@@ -549,7 +566,10 @@ function GlobalSynthControls(
                   const normalizedChange = deltaY / 100;
                   const newNormalized = Math.max(
                     0,
-                    Math.min(1, (startPortamento / 12) ** 0.25 + normalizedChange),
+                    Math.min(
+                      1,
+                      (startPortamento / 12) ** 0.25 + normalizedChange,
+                    ),
                   );
                   // Apply exponential curve for fine control
                   const newPortamento = Math.pow(newNormalized, 4) * 12;
@@ -568,17 +588,19 @@ function GlobalSynthControls(
               }}
               onDoubleClick={() => onParamChange("portamento", 0)} // Double click to reset to 0
               style={{
-                "--rotation": `${Math.pow(params.portamento / 12, 0.25) * 270 - 135}deg`,
+                "--rotation": `${
+                  Math.pow(params.portamento / 12, 0.25) * 270 - 135
+                }deg`,
               } as any}
             />
             <div className="knob-value">
-              {params.portamento < 0.1 
-                ? Math.round(params.portamento * 1000) + "ms" 
+              {params.portamento < 0.1
+                ? Math.round(params.portamento * 1000) + "ms"
                 : params.portamento.toFixed(2) + "s"}
             </div>
           </div>
         </div>
-        
+
         {/* Filter Cutoff Knob */}
         <div className="control-group">
           <label>Filter Cutoff (CC 71)</label>
@@ -589,7 +611,8 @@ function GlobalSynthControls(
                 // Initial Y position
                 const startY = startEvent.clientY;
                 // Convert to log scale for calculations
-                const startLogCutoff = Math.log(params.filterCutoff / 20) / Math.log(1000);
+                const startLogCutoff = Math.log(params.filterCutoff / 20) /
+                  Math.log(1000);
 
                 // Function to handle mouse movement
                 const handleMouseMove = (moveEvent: MouseEvent) => {
@@ -618,17 +641,20 @@ function GlobalSynthControls(
               }}
               onDoubleClick={() => onParamChange("filterCutoff", 2000)} // Double click to reset
               style={{
-                "--rotation": `${(Math.log(params.filterCutoff / 20) / Math.log(1000)) * 270 - 135}deg`,
+                "--rotation": `${
+                  (Math.log(params.filterCutoff / 20) / Math.log(1000)) * 270 -
+                  135
+                }deg`,
               } as any}
             />
             <div className="knob-value">
-              {params.filterCutoff >= 1000 
-                ? (params.filterCutoff / 1000).toFixed(1) + "kHz" 
+              {params.filterCutoff >= 1000
+                ? (params.filterCutoff / 1000).toFixed(1) + "kHz"
                 : Math.round(params.filterCutoff) + "Hz"}
             </div>
           </div>
         </div>
-        
+
         {/* Filter Resonance Knob */}
         <div className="control-group">
           <label>Resonance (CC 75)</label>
@@ -639,7 +665,9 @@ function GlobalSynthControls(
                 // Initial Y position
                 const startY = startEvent.clientY;
                 // Convert from 0.1-20 range to 0-1 for calculations
-                const startNormalized = Math.sqrt((params.filterResonance - 0.1) / 19.9);
+                const startNormalized = Math.sqrt(
+                  (params.filterResonance - 0.1) / 19.9,
+                );
 
                 // Function to handle mouse movement
                 const handleMouseMove = (moveEvent: MouseEvent) => {
@@ -668,7 +696,9 @@ function GlobalSynthControls(
               }}
               onDoubleClick={() => onParamChange("filterResonance", 0.5)} // Double click to reset
               style={{
-                "--rotation": `${(Math.sqrt((params.filterResonance - 0.1) / 19.9)) * 270 - 135}deg`,
+                "--rotation": `${
+                  (Math.sqrt((params.filterResonance - 0.1) / 19.9)) * 270 - 135
+                }deg`,
               } as any}
             />
             <div className="knob-value">
@@ -3017,21 +3047,48 @@ export default function Controller({ user }: ControllerProps) {
       }
 
       // MPK Mini Knob Mappings
-      // CC 70 - Waveform selection
+      // CC 70 - Attack Time (exponential curve 0-2s)
       if (controlNumber === 70) {
-        const waveforms: OscillatorType[] = [
-          "sine",
-          "square",
-          "sawtooth",
-          "triangle",
-        ];
-        const waveformIndex = Math.floor((value / 127) * waveforms.length);
-        const waveform =
-          waveforms[Math.min(waveformIndex, waveforms.length - 1)];
+        // Normalize to 0-1
+        const normalized = value / 127;
+
+        // Apply exponential curve for better control over short attack times
+        // Using power of 3 for a nice curve that emphasizes shorter attack times
+        const curved = Math.pow(normalized, 3);
+
+        // Scale to 0-2 seconds (attack typically shorter than release)
+        const attackTime = curved * 2;
+
+        // Format for display
+        const displayTime = attackTime < 0.1
+          ? Math.round(attackTime * 1000) + "ms"
+          : attackTime.toFixed(2) + "s";
 
         // Apply to all clients using global parameter
-        updateGlobalSynthParam("waveform", waveform);
-        addLog(`MIDI CC 70: Set waveform to ${waveform} for all clients`);
+        updateGlobalSynthParam("attackTime", attackTime);
+        addLog(`MIDI CC 70: Set attack time to ${displayTime} for all clients`);
+      } // CC 74 - Release Time (exponential curve 0-5s)
+      else if (controlNumber === 74) {
+        // Normalize to 0-1
+        const normalized = value / 127;
+
+        // Apply exponential curve for better control over short release times
+        // Using power of 2.5 for a balanced curve
+        const curved = Math.pow(normalized, 2.5);
+
+        // Scale to 0-5 seconds (release typically longer than attack)
+        const releaseTime = curved * 5;
+
+        // Format for display
+        const displayTime = releaseTime < 0.1
+          ? Math.round(releaseTime * 1000) + "ms"
+          : releaseTime.toFixed(2) + "s";
+
+        // Apply to all clients using global parameter
+        updateGlobalSynthParam("releaseTime", releaseTime);
+        addLog(
+          `MIDI CC 74: Set release time to ${displayTime} for all clients`,
+        );
       } // CC 77 - Volume (0-1 linear)
       else if (controlNumber === 77) {
         const volume = value / 127; // Map 0-127 to 0-1 linearly
@@ -3047,19 +3104,19 @@ export default function Controller({ user }: ControllerProps) {
       else if (controlNumber === 73) {
         // Normalize to 0-1
         const normalized = value / 127;
-        
+
         // Apply exponential curve for fine control of shorter times
         // Using exponent of 4 to create heavily weighted curve
         const curved = Math.pow(normalized, 4);
-        
+
         // Scale to 0-12 seconds
         const portamentoTime = curved * 12;
-        
+
         // Round to readable format for logging
-        const displayTime = portamentoTime < 0.1 
+        const displayTime = portamentoTime < 0.1
           ? Math.round(portamentoTime * 1000) + "ms"
           : portamentoTime.toFixed(2) + "s";
-        
+
         // Apply to all clients using global parameter
         updateGlobalSynthParam("portamento", portamentoTime);
         addLog(`MIDI CC 73: Set portamento to ${displayTime} for all clients`);
@@ -3067,28 +3124,34 @@ export default function Controller({ user }: ControllerProps) {
       else if (controlNumber === 71) {
         // Normalize to 0-1
         const normalized = value / 127;
-        
+
         // Apply exponential curve for logarithmic frequency response
         // Map to 20-20000Hz range (logarithmic scale feels natural for frequencies)
         const filterCutoff = 20 * Math.pow(1000, normalized);
-        
+
         // Format for display
-        const displayCutoff = filterCutoff >= 1000 
-          ? (filterCutoff / 1000).toFixed(1) + "kHz" 
+        const displayCutoff = filterCutoff >= 1000
+          ? (filterCutoff / 1000).toFixed(1) + "kHz"
           : Math.round(filterCutoff) + "Hz";
-        
+
         // Apply to all clients using global parameter
         updateGlobalSynthParam("filterCutoff", filterCutoff);
-        addLog(`MIDI CC 71: Set filter cutoff to ${displayCutoff} for all clients`);
+        addLog(
+          `MIDI CC 71: Set filter cutoff to ${displayCutoff} for all clients`,
+        );
       } // CC 75 - Filter Resonance (0.1 to 20)
       else if (controlNumber === 75) {
         // Normalize and map to resonance range (0.1-20)
         // Using a curve that gives more precision in lower values
         const resonance = 0.1 + Math.pow(value / 127, 2) * 19.9;
-        
+
         // Apply to all clients using global parameter
         updateGlobalSynthParam("filterResonance", resonance);
-        addLog(`MIDI CC 75: Set filter resonance to ${resonance.toFixed(1)} for all clients`);
+        addLog(
+          `MIDI CC 75: Set filter resonance to ${
+            resonance.toFixed(1)
+          } for all clients`,
+        );
       } // CC 1 is usually modulation wheel, use for detune
       else if (controlNumber === 1) {
         const detune = Math.floor((value / 127) * 200) - 100; // Map 0-127 to -100 to +100
@@ -3096,6 +3159,41 @@ export default function Controller({ user }: ControllerProps) {
         // Apply to all clients using global parameter
         updateGlobalSynthParam("detune", detune);
         addLog(`MIDI CC 1: Set detune to ${detune} for all clients`);
+      } // CC 72 - Vibrato Rate (0-10Hz)
+      else if (controlNumber === 72) {
+        // Normalize to 0-1
+        const normalized = value / 127;
+
+        // Apply an exponential curve with more fine control in lower rates
+        // (subtle vibrato is more common than extreme)
+        const curved = Math.pow(normalized, 1.5);
+
+        // Scale to 0-10 Hz (0 means no vibrato)
+        const vibratoRate = curved * 10;
+
+        // Apply to all clients using global parameter
+        updateGlobalSynthParam("vibratoRate", vibratoRate);
+        addLog(
+          `MIDI CC 72: Set vibrato rate to ${
+            vibratoRate.toFixed(2)
+          } Hz for all clients`,
+        );
+      } // CC 76 - Vibrato Depth (0-100 cents)
+      else if (controlNumber === 76) {
+        // Normalize to 0-1
+        const normalized = value / 127;
+
+        // Linear mapping for vibrato depth
+        // Scale to 0-100 cents (standard range for vibrato depth, 0 means no vibrato)
+        const vibratoDepth = normalized * 100;
+
+        // Apply to all clients using global parameter
+        updateGlobalSynthParam("vibratoDepth", vibratoDepth);
+        addLog(
+          `MIDI CC 76: Set vibrato depth to ${
+            Math.round(vibratoDepth)
+          } cents for all clients`,
+        );
       }
 
       // Update selected client for UI purposes

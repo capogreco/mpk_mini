@@ -6,6 +6,8 @@ let audioContext: AudioContext | null = null;
 let oscillator: OscillatorNode | null = null;
 let filterNode: BiquadFilterNode | null = null;
 let gainNode: GainNode | null = null;
+let vibratoLFO: OscillatorNode | null = null;
+let vibratoGain: GainNode | null = null;
 
 export default function WebRTC() {
   // State management
@@ -30,17 +32,25 @@ export default function WebRTC() {
   const showAudioButton = useSignal(true);
   const showResumeAudioButton = useSignal(false);
   const reconnectAttemptInterval = useSignal<number | null>(null);
-  
+
   // Global parameters state
   const globalParams = useSignal<{
     portamento: number;
     filterCutoff: number;
     filterResonance: number;
+    attackTime: number;
+    releaseTime: number;
+    vibratoRate: number;
+    vibratoDepth: number;
     [key: string]: any;
   }>({
     portamento: 0,
     filterCutoff: 2000,
-    filterResonance: 0.5
+    filterResonance: 0.5,
+    attackTime: 0.01,
+    releaseTime: 0.1,
+    vibratoRate: 0, // Hz, 0 means no vibrato
+    vibratoDepth: 0, // cents, 0-100 typical range
   });
 
   // Connection health monitoring
@@ -330,15 +340,40 @@ export default function WebRTC() {
             initAudio();
           }
 
-          // Just control gain to enable/disable sound
+          const currentTime = audioContext.currentTime;
+
+          // Use attack and release times for envelope shaping
           if (value) {
-            // Unmute by setting gain to normal value
-            gainNode.gain.value = 0.1; // Default volume
-            addLog("Note on - gain unmuted");
+            // Note on - Apply attack envelope
+            const attackTime = globalParams.value.attackTime || 0.01;
+
+            // Cancel any scheduled changes
+            gainNode.gain.cancelScheduledValues(currentTime);
+
+            // Set initial gain value at current time (could be mid-release)
+            gainNode.gain.setValueAtTime(gainNode.gain.value, currentTime);
+
+            // Ramp to target volume using attackTime
+            gainNode.gain.linearRampToValueAtTime(
+              0.1,
+              currentTime + attackTime,
+            );
+
+            addLog(`Note on - attack time: ${attackTime.toFixed(3)}s`);
           } else {
-            // Mute by setting gain to 0
-            gainNode.gain.value = 0;
-            addLog("Note off - gain muted");
+            // Note off - Apply release envelope
+            const releaseTime = globalParams.value.releaseTime || 0.1;
+
+            // Cancel any scheduled changes
+            gainNode.gain.cancelScheduledValues(currentTime);
+
+            // Set current gain value at current time (could be mid-attack)
+            gainNode.gain.setValueAtTime(gainNode.gain.value, currentTime);
+
+            // Ramp to zero using releaseTime
+            gainNode.gain.linearRampToValueAtTime(0, currentTime + releaseTime);
+
+            addLog(`Note off - release time: ${releaseTime.toFixed(3)}s`);
           }
         }
         break;
@@ -347,21 +382,21 @@ export default function WebRTC() {
           const currentTime = audioContext.currentTime;
           const currentFrequency = oscillator.frequency.value;
           const portamentoTime = globalParams.value.portamento || 0;
-          
+
           // If portamento is 0 or very small, set value immediately
           if (portamentoTime < 0.005) {
             oscillator.frequency.value = value;
           } else {
             // Apply portamento - cancel any scheduled changes first
             oscillator.frequency.cancelScheduledValues(currentTime);
-            
+
             // Set current frequency explicitly at current time as starting point
             oscillator.frequency.setValueAtTime(currentFrequency, currentTime);
-            
+
             // Schedule exponential ramp to new value
             oscillator.frequency.exponentialRampToValueAtTime(
-              value, 
-              currentTime + portamentoTime
+              value,
+              currentTime + portamentoTime,
             );
           }
         }
@@ -370,7 +405,7 @@ export default function WebRTC() {
         // Store portamento value in global params
         globalParams.value = {
           ...globalParams.value,
-          portamento: value
+          portamento: value,
         };
         break;
       case "filterCutoff":
@@ -381,7 +416,7 @@ export default function WebRTC() {
         // Store in global params
         globalParams.value = {
           ...globalParams.value,
-          filterCutoff: value
+          filterCutoff: value,
         };
         break;
       case "filterResonance":
@@ -392,8 +427,76 @@ export default function WebRTC() {
         // Store in global params
         globalParams.value = {
           ...globalParams.value,
-          filterResonance: value
+          filterResonance: value,
         };
+        break;
+      case "attackTime":
+        // Store attack time in global params
+        globalParams.value = {
+          ...globalParams.value,
+          attackTime: value,
+        };
+        addLog(`Attack time updated: ${value.toFixed(3)}s`);
+        break;
+      case "releaseTime":
+        // Store release time in global params
+        globalParams.value = {
+          ...globalParams.value,
+          releaseTime: value,
+        };
+        addLog(`Release time updated: ${value.toFixed(3)}s`);
+        break;
+      case "vibratoRate":
+        // Store and apply vibrato rate
+        globalParams.value = {
+          ...globalParams.value,
+          vibratoRate: value,
+        };
+
+        // Update the LFO frequency if it exists
+        if (vibratoLFO && audioContext) {
+          // If rate is 0, disable vibrato
+          if (value <= 0) {
+            // Disconnect vibrato if it's connected
+            if (vibratoGain && vibratoGain.connect) {
+              try {
+                vibratoGain.gain.value = 0;
+              } catch (e) {
+                console.error("[SYNTH] Error disabling vibrato:", e);
+              }
+            }
+          } else {
+            // Set LFO frequency (vibrato rate)
+            vibratoLFO.frequency.value = value;
+
+            // Make sure the gain is connected if vibrato depth > 0
+            if (vibratoGain && globalParams.value.vibratoDepth > 0) {
+              vibratoGain.gain.value = globalParams.value.vibratoDepth;
+            }
+          }
+        }
+
+        addLog(`Vibrato rate updated: ${value.toFixed(2)} Hz`);
+        break;
+      case "vibratoDepth":
+        // Store and apply vibrato depth
+        globalParams.value = {
+          ...globalParams.value,
+          vibratoDepth: value,
+        };
+
+        // Update the vibrato gain if it exists
+        if (vibratoGain && audioContext) {
+          // If depth is 0, disable vibrato
+          if (value <= 0) {
+            vibratoGain.gain.value = 0;
+          } else {
+            // Set vibrato depth (in cents, controls LFO gain)
+            vibratoGain.gain.value = value;
+          }
+        }
+
+        addLog(`Vibrato depth updated: ${value.toFixed(1)} cents`);
         break;
       case "waveform":
         if (oscillator) {
@@ -430,14 +533,35 @@ export default function WebRTC() {
     if (!audioEnabled.value && audioContext === null) {
       initAudio();
     }
-    
-    // Update our local tracking of global parameters
+
+    // Update our local tracking of global parameters with all received params
+    const updatedParams = { ...globalParams.value };
+
+    // Update each parameter that exists in the bundle
     if (params.portamento !== undefined) {
-      globalParams.value = {
-        ...globalParams.value,
-        portamento: params.portamento
-      };
+      updatedParams.portamento = params.portamento;
     }
+    if (params.filterCutoff !== undefined) {
+      updatedParams.filterCutoff = params.filterCutoff;
+    }
+    if (params.filterResonance !== undefined) {
+      updatedParams.filterResonance = params.filterResonance;
+    }
+    if (params.attackTime !== undefined) {
+      updatedParams.attackTime = params.attackTime;
+    }
+    if (params.releaseTime !== undefined) {
+      updatedParams.releaseTime = params.releaseTime;
+    }
+    if (params.vibratoRate !== undefined) {
+      updatedParams.vibratoRate = params.vibratoRate;
+    }
+    if (params.vibratoDepth !== undefined) {
+      updatedParams.vibratoDepth = params.vibratoDepth;
+    }
+
+    // Update the global params with all changes at once
+    globalParams.value = updatedParams;
 
     // Process each parameter in the bundle
     Object.entries(params).forEach(([param, value]) => {
@@ -878,7 +1002,7 @@ export default function WebRTC() {
     }, 10000); // Check every 10 seconds
   };
 
-  // Start audio - now just initializes audio and unmutes gain
+  // Start audio - initializes audio and applies attack envelope
   const startAudio = () => {
     // Initialize if not already done
     if (!audioContext) {
@@ -888,21 +1012,43 @@ export default function WebRTC() {
       audioState.value = audioContext.state;
     }
 
-    // Unmute gain to hear sound
-    if (gainNode) {
-      gainNode.gain.value = 0.1; // Default volume
+    // Apply attack envelope
+    if (gainNode && audioContext) {
+      const currentTime = audioContext.currentTime;
+      const attackTime = globalParams.value.attackTime || 0.01;
+
+      // Cancel any scheduled changes
+      gainNode.gain.cancelScheduledValues(currentTime);
+
+      // Set initial gain
+      gainNode.gain.setValueAtTime(0, currentTime);
+
+      // Ramp to full volume using attack time
+      gainNode.gain.linearRampToValueAtTime(0.1, currentTime + attackTime);
+
+      addLog(`Audio started with attack time: ${attackTime.toFixed(3)}s`);
     }
 
     // Send audio status to controller
     sendAudioStatus();
   };
 
-  // Stop audio - now just mutes gain without stopping oscillator
+  // Stop audio - applies release envelope instead of immediate muting
   const stopAudio = () => {
-    if (gainNode) {
-      // Just mute the gain without stopping oscillator
-      gainNode.gain.value = 0;
-      addLog("Audio muted (oscillator still running)");
+    if (gainNode && audioContext) {
+      const currentTime = audioContext.currentTime;
+      const releaseTime = globalParams.value.releaseTime || 0.1;
+
+      // Cancel any scheduled changes
+      gainNode.gain.cancelScheduledValues(currentTime);
+
+      // Set current gain value
+      gainNode.gain.setValueAtTime(gainNode.gain.value, currentTime);
+
+      // Ramp to zero using release time
+      gainNode.gain.linearRampToValueAtTime(0, currentTime + releaseTime);
+
+      addLog(`Audio stopped with release time: ${releaseTime.toFixed(3)}s`);
 
       // Send audio status to controller
       sendAudioStatus();
@@ -922,24 +1068,38 @@ export default function WebRTC() {
         filterNode.type = "lowpass";
         filterNode.frequency.value = globalParams.value.filterCutoff; // Initial cutoff
         filterNode.Q.value = globalParams.value.filterResonance; // Initial resonance
-        
+
         // Create the gain node (initially muted)
         gainNode = audioContext.createGain();
         gainNode.gain.value = 0; // Start muted
-        
+
         // Create and start a single oscillator that runs continuously
         oscillator = audioContext.createOscillator();
         oscillator.type = "sine"; // Default waveform
         oscillator.frequency.value = 440; // Default frequency (A4)
-        
-        // Connect the audio chain: oscillator -> filter -> gain -> output
+
+        // Create vibrato LFO system
+        vibratoLFO = audioContext.createOscillator();
+        vibratoLFO.type = "sine"; // Sine wave for smooth vibrato
+        vibratoLFO.frequency.value = globalParams.value.vibratoRate || 0; // Initial vibrato rate (Hz)
+
+        // Create gain node to control vibrato depth
+        vibratoGain = audioContext.createGain();
+        vibratoGain.gain.value = globalParams.value.vibratoDepth || 0; // Initial vibrato depth (cents)
+
+        // Connect the vibrato LFO to oscillator frequency
+        vibratoLFO.connect(vibratoGain);
+        vibratoGain.connect(oscillator.detune);
+
+        // Connect the main audio chain: oscillator -> filter -> gain -> output
         oscillator.connect(filterNode);
         filterNode.connect(gainNode);
         gainNode.connect(audioContext.destination);
-        
-        // Start the oscillator immediately and let it run continuously
-        // We'll control sound with the gain node
+
+        // Start the oscillator and LFO immediately and let them run continuously
+        // We'll control sound with the gain node and vibrato with the LFO parameters
         oscillator.start();
+        vibratoLFO.start();
 
         audioState.value = audioContext.state;
         addLog(
@@ -1061,6 +1221,19 @@ export default function WebRTC() {
           // Ignore errors when stopping already stopped oscillator
         }
       }
+
+      // Clean up vibrato LFO
+      if (vibratoLFO) {
+        try {
+          vibratoLFO.stop();
+        } catch (e) {
+          // Ignore errors when stopping already stopped LFO
+        }
+      }
+
+      // Reset audio nodes
+      vibratoLFO = null;
+      vibratoGain = null;
 
       // Stop intervals
       if (heartbeatInterval.value !== null) {
