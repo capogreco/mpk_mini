@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Synth - Minimal Distributed Synth</title>
+    <meta charset="utf-8">
+    <style>
+        body {
+            font-family: monospace;
+            padding: 20px;
+            max-width: 600px;
+            margin: 0 auto;
+            background: #1a1a1a;
+            color: #f0f0f0;
+        }
+        #status {
+            padding: 10px;
+            background: #333;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+        #visualizer {
+            width: 100%;
+            height: 200px;
+            background: #000;
+            border-radius: 4px;
+            margin: 20px 0;
+            transition: opacity 0.3s;
+        }
+        #visualizer.dimmed {
+            opacity: 0.3;
+        }
+        .param {
+            padding: 10px;
+            margin: 10px 0;
+            background: #2a2a2a;
+            border-radius: 4px;
+        }
+        button {
+            padding: 10px 20px;
+            background: #444;
+            border: none;
+            color: white;
+            border-radius: 4px;
+            cursor: pointer;
+            font-family: monospace;
+        }
+        button:hover {
+            background: #555;
+        }
+        #start_audio {
+            display: block;
+            margin: 30px auto;
+            padding: 15px 30px;
+            background: #c44;
+            font-size: 16px;
+            animation: pulse 2s infinite;
+        }
+        #start_audio:hover {
+            background: #d55;
+        }
+        #start_audio:disabled {
+            animation: none;
+            background: #444;
+            opacity: 0.5;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.8; }
+        }
+        #audio_hint {
+            text-align: center;
+            color: #888;
+            font-size: 14px;
+            margin-bottom: 10px;
+        }
+        .dimmed {
+            opacity: 0.3;
+            transition: opacity 0.3s;
+        }
+    </style>
+</head>
+<body>
+    <h1>Synth</h1>
+    
+    <div id="status">Disconnected</div>
+    
+    <div id="controllers" style="margin-top: 20px;">
+        <h3>Connected Controllers</h3>
+        <div id="controller_list" style="padding: 10px; background: #2a2a2a; border-radius: 4px;">None</div>
+    </div>
+    
+    <div id="audio_hint">Click to enable audio engine</div>
+    <button id="start_audio">Start Audio</button>
+    
+    <canvas id="visualizer" class="dimmed"></canvas>
+    
+    <div id="params" class="dimmed">
+        <div class="param">Volume: <span id="volume_display">0.2</span></div>
+    </div>
+
+    <script>
+        const synth_id = `synth-${Math.random ().toString (36).substr (2, 9)}`
+        let ws = null
+        let audio_context = null
+        let pink_noise = null
+        let gain_node = null
+        let analyser = null
+        const controllers = new Map ()
+        let stored_volume = 0.2  // store volume separately from gain
+        let is_powered_on = true  // track power state
+        
+        // webrtc configuration
+        let rtc_config = {
+            iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+        }
+        
+        // fetch ice servers from server
+        async function fetch_ice_servers () {
+            try {
+                const response = await fetch ("/ice-servers")
+                const data = await response.json ()
+                rtc_config.iceServers = data.ice_servers
+                console.log ("ICE servers loaded:", rtc_config.iceServers)
+            } catch (error) {
+                console.error ("Failed to fetch ICE servers, using defaults:", error)
+            }
+        }
+        
+        // ui elements
+        const status_el = document.getElementById ("status")
+        const start_button = document.getElementById ("start_audio")
+        const volume_display = document.getElementById ("volume_display")
+        const canvas = document.getElementById ("visualizer")
+        const ctx = canvas.getContext ("2d")
+        
+        // set canvas size
+        canvas.width = canvas.offsetWidth
+        canvas.height = canvas.offsetHeight
+        
+        // connect to websocket
+        function connect_websocket () {
+            const protocol = window.location.protocol === "https:" ? "wss:" : "ws:"
+            ws = new WebSocket (`${protocol}//${window.location.host}/ws`)
+            
+            ws.addEventListener ("open", () => {
+                console.log ("connected to server")
+                status_el.textContent = `Connected as ${synth_id}`
+                
+                // register with server
+                send_message ({
+                    type: "register",
+                    client_id: synth_id
+                })
+                
+                // request list of active controllers
+                send_message ({
+                    type: "request-controllers",
+                    source: synth_id
+                })
+            })
+            
+            ws.addEventListener ("message", async (event) => {
+                const message = JSON.parse (event.data)
+                await handle_message (message)
+            })
+            
+            ws.addEventListener ("close", () => {
+                console.log ("disconnected from server")
+                status_el.textContent = "Disconnected - Reconnecting..."
+                setTimeout (connect_websocket, 2000)
+            })
+        }
+        
+        // send message via websocket
+        function send_message (message) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send (JSON.stringify (message))
+            }
+        }
+        
+        // handle incoming messages
+        async function handle_message (message) {
+            console.log ("received:", message)
+            
+            if (message.type === "controllers-list") {
+                // received list of active controllers
+                console.log (`received controllers list: ${message.controllers.join (", ")}`)
+                for (const controller_id of message.controllers) {
+                    if (!controllers.has (controller_id)) {
+                        console.log (`discovered controller: ${controller_id}`)
+                        controllers.set (controller_id, {
+                            id: controller_id,
+                            connection: null,
+                            channel: null,
+                            connected: false
+                        })
+                        // initiate connection to newly discovered controller
+                        connect_to_controller (controller_id)
+                    }
+                }
+                update_controller_list ()
+                
+            } else if (message.type === "controller-joined") {
+                // new controller joined
+                console.log (`new controller joined: ${message.controller_id}`)
+                if (!controllers.has (message.controller_id)) {
+                    console.log (`connecting to new controller: ${message.controller_id}`)
+                    controllers.set (message.controller_id, {
+                        id: message.controller_id,
+                        connection: null,
+                        channel: null,
+                        connected: false
+                    })
+                    // initiate connection to new controller
+                    connect_to_controller (message.controller_id)
+                }
+                update_controller_list ()
+                
+            } else if (message.type === "controller-left") {
+                // controller disconnected
+                console.log (`controller left: ${message.controller_id}`)
+                if (controllers.has (message.controller_id)) {
+                    const controller = controllers.get (message.controller_id)
+                    // close connection if exists
+                    if (controller.connection) {
+                        controller.connection.close ()
+                    }
+                    controllers.delete (message.controller_id)
+                }
+                update_controller_list ()
+                
+            } else if (message.type === "offer") {
+                // shouldn't receive offers as synth initiates
+                console.warn ("synth received unexpected offer")
+                
+            } else if (message.type === "answer") {
+                // handle webrtc answer from controller
+                const controller = controllers.get (message.source)
+                if (controller && controller.connection) {
+                    await controller.connection.setRemoteDescription (message.data)
+                    
+                    // process any queued ice candidates
+                    if (controller.ice_queue && controller.ice_queue.length > 0) {
+                        console.log (`processing ${controller.ice_queue.length} queued ice candidates`)
+                        for (const candidate of controller.ice_queue) {
+                            await controller.connection.addIceCandidate (candidate)
+                        }
+                        controller.ice_queue = []
+                    }
+                }
+                
+            } else if (message.type === "ice") {
+                // handle ice candidate
+                const controller = controllers.get (message.source)
+                if (controller && controller.connection) {
+                    try {
+                        if (controller.connection.remoteDescription) {
+                            console.log (`adding ice candidate: ${message.data.candidate}`)
+                            await controller.connection.addIceCandidate (message.data)
+                        } else {
+                            // queue ice candidate until remote description is set
+                            console.log ("queueing ice candidate")
+                            if (!controller.ice_queue) controller.ice_queue = []
+                            controller.ice_queue.push (message.data)
+                        }
+                    } catch (error) {
+                        console.error ("error adding ice candidate:", error)
+                    }
+                }
+            }
+        }
+        
+        // create webrtc connection to controller
+        async function connect_to_controller (controller_id) {
+            console.log (`initiating connection to ${controller_id}`)
+            
+            const pc = new RTCPeerConnection (rtc_config)
+            const controller = controllers.get (controller_id)
+            controller.connection = pc
+            controller.ice_queue = []
+            
+            // create data channels
+            const param_channel = pc.createDataChannel ("params", {
+                ordered: false,
+                maxRetransmits: 0
+            })
+            const command_channel = pc.createDataChannel ("commands", {
+                ordered: true
+            })
+            
+            controller.channel = param_channel
+            controller.command_channel = command_channel
+            
+            // handle ice candidates
+            pc.addEventListener ("icecandidate", (event) => {
+                if (event.candidate) {
+                    console.log (`sending ice candidate: ${event.candidate.candidate}`)
+                    send_message ({
+                        type: "ice",
+                        source: synth_id,
+                        target: controller_id,
+                        data: event.candidate
+                    })
+                } else {
+                    console.log ("ice gathering complete")
+                }
+            })
+            
+            // set up param channel handlers
+            param_channel.addEventListener ("open", () => {
+                console.log (`param channel open to ${controller_id}`)
+                controller.connected = true
+                update_controller_list ()
+                
+                // send immediate state update (like a pong without a ping)
+                param_channel.send (JSON.stringify ({
+                    type: "pong",
+                    timestamp: Date.now (),
+                    state: {
+                        audio_enabled: !!audio_context,
+                        volume: stored_volume,
+                        powered_on: is_powered_on
+                    }
+                }))
+            })
+            
+            param_channel.addEventListener ("message", (event) => {
+                handle_data_message (JSON.parse (event.data))
+            })
+            
+            param_channel.addEventListener ("close", () => {
+                console.log (`param channel closed to ${controller_id}`)
+                controller.connected = false
+                update_controller_list ()
+            })
+            
+            // set up command channel handlers
+            command_channel.addEventListener ("message", (event) => {
+                const command = JSON.parse (event.data)
+                if (command.type === "command") {
+                    handle_command (command)
+                }
+            })
+            
+            // handle connection state
+            pc.addEventListener ("connectionstatechange", () => {
+                console.log (`connection state to ${controller_id}: ${pc.connectionState}`)
+                
+                if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+                    controller.connected = false
+                    update_controller_list ()
+                }
+            })
+            
+            // create and send offer
+            const offer = await pc.createOffer ()
+            await pc.setLocalDescription (offer)
+            
+            send_message ({
+                type: "offer",
+                source: synth_id,
+                target: controller_id,
+                data: offer
+            })
+        }
+
+        
+        // initialize audio
+        async function init_audio () {
+            audio_context = new (window.AudioContext || window.webkitAudioContext) ()
+            
+            // load audio worklet
+            await audio_context.audioWorklet.addModule ("pink_noise.js")
+            
+            // create nodes
+            pink_noise = new AudioWorkletNode (audio_context, "ridge-rat-type2-pink-noise-generator")
+            gain_node = audio_context.createGain ()
+            analyser = audio_context.createAnalyser ()
+            
+            // connect nodes
+            pink_noise.connect (gain_node)
+            gain_node.connect (analyser)
+            analyser.connect (audio_context.destination)
+            
+            // set initial volume based on power state
+            gain_node.gain.value = is_powered_on ? stored_volume : 0
+            
+            // set pink noise amplitude
+            pink_noise.parameters.get ("amplitude").value = 0.2
+            
+            start_button.textContent = "Audio Running"
+            start_button.disabled = true
+            document.getElementById ("audio_hint").style.display = "none"
+            
+            // remove dimmed state from UI elements
+            document.getElementById ("visualizer").classList.remove ("dimmed")
+            document.getElementById ("params").classList.remove ("dimmed")
+            
+            // start visualizer
+            draw_visualizer ()
+        }
+        
+        // visualizer
+        function draw_visualizer () {
+            requestAnimationFrame (draw_visualizer)
+            
+            if (!analyser) return
+            
+            const buffer_length = analyser.frequencyBinCount
+            const data_array = new Uint8Array (buffer_length)
+            analyser.getByteFrequencyData (data_array)
+            
+            ctx.fillStyle = "rgb(0, 0, 0)"
+            ctx.fillRect (0, 0, canvas.width, canvas.height)
+            
+            const bar_width = (canvas.width / buffer_length) * 2.5
+            let bar_height
+            let x = 0
+            
+            for (let i = 0; i < buffer_length; i++) {
+                bar_height = (data_array[i] / 255) * canvas.height
+                
+                ctx.fillStyle = `rgb(${bar_height + 100}, 50, 50)`
+                ctx.fillRect (x, canvas.height - bar_height, bar_width, bar_height)
+                
+                x += bar_width + 1
+            }
+        }
+
+        
+        // handle data messages from controllers
+        function handle_data_message (data) {
+            if (data.type === "param") {
+                console.log (`param ${data.name} = ${data.value}`)
+                if (data.name === "volume") {
+                    stored_volume = data.value
+                    volume_display.textContent = data.value.toFixed (2)
+                    if (gain_node && is_powered_on) {
+                        gain_node.gain.value = data.value
+                    }
+                }
+            } else if (data.type === "ping") {
+                // find the controller that sent this ping
+                for (const [ctrl_id, ctrl] of controllers) {
+                    if (ctrl.channel && ctrl.channel.readyState === "open") {
+                        ctrl.channel.send (JSON.stringify ({
+                            type: "pong",
+                            timestamp: data.timestamp,
+                            state: {
+                                audio_enabled: !!audio_context,
+                                volume: stored_volume,
+                                powered_on: is_powered_on
+                            }
+                        }))
+                        break
+                    }
+                }
+            }
+        }
+        
+        // handle command updates
+        function handle_command (command) {
+            console.log (`command ${command.name} = ${command.value}`)
+            if (command.name === "power") {
+                is_powered_on = command.value
+                if (gain_node) {
+                    if (command.value) {
+                        // power on - restore stored volume
+                        gain_node.gain.value = stored_volume
+                    } else {
+                        // power off - mute
+                        gain_node.gain.value = 0
+                    }
+                }
+            }
+        }
+        
+        // update controller list display
+        function update_controller_list () {
+            const controller_list_el = document.getElementById ("controller_list")
+            const all_controllers = Array.from (controllers.entries ())
+            
+            if (all_controllers.length === 0) {
+                controller_list_el.textContent = "None"
+            } else {
+                controller_list_el.innerHTML = all_controllers.map (([id, ctrl]) => 
+                    `<div style="margin: 2px 0;">${id} ${ctrl.connected ? '(connected)' : '(discovered)'}</div>`
+                ).join ("")
+            }
+        }
+        
+        // start audio on user gesture
+        start_button.addEventListener ("click", init_audio)
+        
+        // start connection
+        fetch_ice_servers ().then (() => {
+            connect_websocket ()
+        })
+    </script>
+</body>
+</html>
