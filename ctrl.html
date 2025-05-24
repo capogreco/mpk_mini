@@ -48,6 +48,35 @@
             font-size: 0.9em;
         }
         .stat {
+            display: flex;
+            justify-content: space-between;
+        }
+        #midi-status {
+            padding: 10px;
+            background: #e8f5e9;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+        #midi-monitor {
+            padding: 10px;
+            background: #f5f5f5;
+            border-radius: 4px;
+            margin-bottom: 20px;
+            max-height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 0.9em;
+        }
+        .midi-message {
+            padding: 2px 0;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        .midi-device {
+            padding: 5px;
+            margin: 5px 0;
+            background: #e3f2fd;
+            border-radius: 3px;
+        }
             display: inline-block;
             margin-right: 20px;
         }
@@ -65,6 +94,7 @@
     <div id="stats">
         <span class="stat">Connected: <strong id="connected_count">0</strong></span>
         <span class="stat">Avg Latency: <strong id="avg_latency">-</strong></span>
+        <span class="stat" id="allocation_info"></span>
     </div>
     
     <div id="controller_warning" style="display: none; padding: 10px; background: #ff9800; color: white; border-radius: 4px; margin-bottom: 10px;">
@@ -88,12 +118,56 @@
         <div id="synth_list">None connected</div>
     </div>
 
+    <div id="midi-status">
+        <h3>MIDI Status</h3>
+        <div id="midi-devices">No MIDI devices detected</div>
+    </div>
+
+    <div id="midi-mappings" style="padding: 10px; background: #e3f2fd; border-radius: 4px; margin-bottom: 20px;">
+        <h3>MPK Mini MK3 Mappings</h3>
+        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; font-size: 0.9em;">
+            <div>
+                <strong>Knobs (CC 70-77):</strong>
+                <ul style="margin: 5px 0; padding-left: 20px;">
+                    <li>Knob 1 → Volume</li>
+                    <li>Knobs 2-8 → Available</li>
+                </ul>
+            </div>
+            <div>
+                <strong>Joystick:</strong>
+                <ul style="margin: 5px 0; padding-left: 20px;">
+                    <li>Up/Down → Pitch Bend</li>
+                    <li>Left/Right → Modulation</li>
+                </ul>
+            </div>
+            <div>
+                <strong>Pads (Ch 10):</strong>
+                <ul style="margin: 5px 0; padding-left: 20px;">
+                    <li>Pads 1-8 → Triggers</li>
+                </ul>
+            </div>
+            <div>
+                <strong>Keys:</strong>
+                <ul style="margin: 5px 0; padding-left: 20px;">
+                    <li>Play notes (Ch 1)</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <div id="midi-monitor">
+        <h3>MIDI Monitor</h3>
+        <div id="midi-messages">Waiting for MIDI input...</div>
+    </div>
+
     <script>
         const controller_id = `ctrl-${Math.random ().toString (36).substr (2, 9)}`
         const peers = new Map ()
         const other_controllers = new Set ()
         let ws = null
         let heartbeat_interval = null
+        const held_notes = [] // Track currently held notes for allocation
+        const voice_assignments = new Map() // Track which synth is playing which note
         
         // webrtc configuration
         let rtc_config = {
@@ -500,7 +574,20 @@
             // handle param channel messages
             param_channel.addEventListener ("message", (event) => {
                 const data = JSON.parse (event.data)
-                if (data.type === "pong") {
+                if (data.type === "request_state") {
+                    // Send current controller state
+                    param_channel.send (JSON.stringify ({
+                        type: "param",
+                        name: "volume",
+                        value: parseFloat (volume_el.value)
+                    }))
+                    command_channel.send (JSON.stringify ({
+                        type: "command",
+                        name: "power",
+                        value: power_el.checked
+                    }))
+                } else if (data.type === "pong") {
+                    // handle pong response
                     const rtt = Date.now () - data.timestamp
                     const peer = peers.get (synth_id)
                     peer.latency = rtt
@@ -637,7 +724,7 @@
         function update_controller_warning () {
             const warning_el = document.getElementById ("controller_warning")
             const list_el = document.getElementById ("other_controllers")
-            
+
             if (other_controllers.size > 0) {
                 warning_el.style.display = "block"
                 list_el.textContent = `Other controllers: ${Array.from (other_controllers).join (", ")}`
@@ -645,7 +732,370 @@
                 warning_el.style.display = "none"
             }
         }
+
+        // MIDI functionality
+        let midi_access = null
+        let midi_input = null
+        const midi_devices_el = document.getElementById ("midi-devices")
+        const midi_messages_el = document.getElementById ("midi-messages")
+        const MAX_MIDI_MESSAGES = 50 // Keep last 50 messages
+
+        // Initialize Web MIDI
+        async function init_midi () {
+            try {
+                midi_access = await navigator.requestMIDIAccess ()
+                console.log ("MIDI access granted")
+                
+                // List all available MIDI inputs
+                update_midi_devices ()
+                
+                // Listen for device changes
+                midi_access.addEventListener ("statechange", update_midi_devices)
+                
+            } catch (error) {
+                console.error ("MIDI access denied:", error)
+                midi_devices_el.innerHTML = `<span style="color: red;">MIDI access denied: ${error.message}</span>`
+            }
+        }
+
+        // Update MIDI device list and connect to MPK Mini if found
+        function update_midi_devices () {
+            const inputs = Array.from (midi_access.inputs.values ())
+            
+            if (inputs.length === 0) {
+                midi_devices_el.innerHTML = "No MIDI devices detected"
+                return
+            }
+            
+            // Build device list HTML
+            let html = ""
+            inputs.forEach (input => {
+                const connected = input.state === "connected"
+                const is_mpk = input.name.toLowerCase ().includes ("mpk")
+                html += `<div class="midi-device">
+                    ${input.name} 
+                    <span style="color: ${connected ? 'green' : 'red'};">
+                        ${connected ? '● Connected' : '○ Disconnected'}
+                    </span>
+                    ${is_mpk ? ' (MPK Mini detected!)' : ''}
+                </div>`
+                
+                // Auto-connect to MPK Mini
+                if (is_mpk && connected && input !== midi_input) {
+                    connect_midi_input (input)
+                }
+            })
+            
+            midi_devices_el.innerHTML = html
+        }
+
+        // Connect to a MIDI input device
+        function connect_midi_input (input) {
+            // Disconnect from previous input if any
+            if (midi_input) {
+                midi_input.onmidimessage = null
+            }
+            
+            midi_input = input
+            midi_input.onmidimessage = handle_midi_message
+            console.log (`Connected to MIDI input: ${input.name}`)
+            add_midi_monitor_message (`Connected to: ${input.name}`)
+        }
+
+        // Handle incoming MIDI messages
+        function handle_midi_message (event) {
+            const [status, data1, data2] = event.data
+            const channel = (status & 0x0F) + 1
+            const command = status & 0xF0
+            
+            let message = ""
+            let param_name = null
+            let param_value = null
+            
+            switch (command) {
+                case 0x90: // Note On
+                    if (data2 > 0) {
+                        message = `Note On: ${get_note_name (data1)} (${data1}) Velocity: ${data2} CH: ${channel}`
+                        // Handle pads (Channel 10, notes 36-43)
+                        if (channel === 10 && data1 >= 36 && data1 <= 43) {
+                            const pad_num = data1 - 35 // Pad 1-8
+                            message += ` (Pad ${pad_num})`
+                            // Send pad trigger to synths
+                            send_to_all_synths ('command', `pad${pad_num}`, {
+                                velocity: data2 / 127,
+                                note: data1
+                            })
+                        } else if (channel === 1) {
+                            // Handle keyboard notes
+                            held_notes.push({
+                                note: data1,
+                                velocity: data2 / 127,
+                                timestamp: Date.now()
+                            })
+                            allocate_note(data1, data2 / 127)
+                        }
+                    } else {
+                        message = `Note Off: ${get_note_name (data1)} (${data1}) CH: ${channel}`
+                    }
+                    break
+                    
+                case 0x80: // Note Off
+                    message = `Note Off: ${get_note_name (data1)} (${data1}) CH: ${channel}`
+                    if (channel === 1) {
+                        // Handle keyboard note off
+                        const index = held_notes.findIndex(n => n.note === data1)
+                        if (index !== -1) {
+                            held_notes.splice(index, 1)
+                            release_note(data1)
+                        }
+                    }
+                    break
+                    
+                case 0xB0: // Control Change (CC)
+                    message = `CC ${data1}: ${data2} CH: ${channel}`
+                    // Map CC to parameters (MPK Mini MK3 mappings)
+                    if (data1 >= 70 && data1 <= 77) {
+                        const knob_num = data1 - 69 // Knob 1-8
+                        message += ` (Knob ${knob_num})`
+                        // Map knobs to synth parameters
+                        if (knob_num === 1) { // Knob 1 (CC 70) -> Volume
+                            const volume = data2 / 127
+                            volume_el.value = volume
+                            volume_value_el.textContent = volume.toFixed (2)
+                            volume_el.dispatchEvent (new Event ('input'))
+                        }
+                        // Send knob data to synths
+                        send_to_all_synths ('param', `knob${knob_num}`, data2 / 127)
+                    } else if (data1 === 1) {
+                        message += " (Modulation)"
+                        // Send modulation to synths
+                        send_to_all_synths ('param', 'modulation', data2 / 127)
+                    }
+                    break
+                    
+                case 0xE0: // Pitch Bend
+                    const bend_value = (data2 << 7) | data1
+                    const bend_centered = (bend_value - 8192) / 8192 // -1 to 1
+                    message = `Pitch Bend: ${bend_centered.toFixed (3)} CH: ${channel}`
+                    // Send pitch bend to synths
+                    send_to_all_synths ('param', 'pitch_bend', bend_centered)
+                    break
+                    
+                default:
+                    message = `Unknown: Status: ${status.toString (16)} Data: ${data1} ${data2}`
+            }
+            
+            add_midi_monitor_message (message)
+        }
+
+        // Add message to MIDI monitor
+        function add_midi_monitor_message (message) {
+            const timestamp = new Date ().toLocaleTimeString ()
+            const msg_html = `<div class="midi-message">${timestamp} - ${message}</div>`
+            
+            // Add new message at top
+            if (midi_messages_el.innerHTML === "Waiting for MIDI input...") {
+                midi_messages_el.innerHTML = msg_html
+            } else {
+                midi_messages_el.insertAdjacentHTML ('afterbegin', msg_html)
+            }
+            
+            // Keep only last MAX_MIDI_MESSAGES
+            const messages = midi_messages_el.querySelectorAll ('.midi-message')
+            if (messages.length > MAX_MIDI_MESSAGES) {
+                messages [messages.length - 1].remove ()
+            }
+        }
+
+        // Convert MIDI note number to note name
+        function get_note_name (note_num) {
+            const notes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+            const octave = Math.floor (note_num / 12) - 1
+            const note = notes [note_num % 12]
+            return `${note}${octave}`
+        }
+
+        // Helper function to send data to all connected synths
+        function send_to_all_synths (channel_type, param_name, value) {
+            peers.forEach ((peer, synth_id) => {
+                if (peer.connection.connectionState === "connected") {
+                    const channel = channel_type === 'param' ? peer.param_channel : peer.command_channel
+                    if (channel && channel.readyState === "open") {
+                        channel.send (JSON.stringify ({
+                            type: channel_type,
+                            name: param_name,
+                            value: value
+                        }))
+                    }
+                }
+            })
+        }
+
+        // Allocate a new note using voice stealing if necessary
+        function allocate_note(note, velocity) {
+            const active_synths = Array.from(peers.entries())
+                .filter(([id, peer]) => peer.connection.connectionState === "connected")
+                .map(([id, peer]) => id)
+            
+            if (active_synths.length === 0) return
+            
+            // If we have more held notes than synths, we need voice stealing
+            if (held_notes.length > active_synths.length) {
+                // Find which synth should play this note based on modulo
+                const target_index = (held_notes.length - 1) % active_synths.length
+                const target_synth = active_synths[target_index]
+                
+                // Send the new note to the target synth
+                send_note_to_synth(target_synth, note, velocity)
+                
+                // Track what this synth is now playing
+                voice_assignments.set(target_synth, {
+                    current_note: note,
+                    stolen_from: voice_assignments.get(target_synth)?.current_note || null
+                })
+            } else {
+                // We have enough synths for all notes - simple allocation
+                held_notes.forEach((held_note, index) => {
+                    const synth_id = active_synths[index % active_synths.length]
+                    send_note_to_synth(synth_id, held_note.note, held_note.velocity)
+                    voice_assignments.set(synth_id, {
+                        current_note: held_note.note,
+                        stolen_from: null
+                    })
+                })
+            }
+            
+            update_allocation_display()
+        }
         
+        // Handle note release with potential note returning
+        function release_note(released_note) {
+            const active_synths = Array.from(peers.entries())
+                .filter(([id, peer]) => peer.connection.connectionState === "connected")
+                .map(([id, peer]) => id)
+            
+            if (active_synths.length === 0) return
+            
+            // Find which synth was playing the released note
+            for (const [synth_id, assignment] of voice_assignments) {
+                if (assignment.current_note === released_note) {
+                    // Check if this synth should return to a previous note
+                    if (assignment.stolen_from && held_notes.some(n => n.note === assignment.stolen_from)) {
+                        // Return to the stolen note
+                        const stolen_note = held_notes.find(n => n.note === assignment.stolen_from)
+                        send_note_to_synth(synth_id, stolen_note.note, stolen_note.velocity)
+                        voice_assignments.set(synth_id, {
+                            current_note: stolen_note.note,
+                            stolen_from: null
+                        })
+                    } else {
+                        // No note to return to - redistribute all remaining notes
+                        if (held_notes.length === 0) {
+                            // No notes left - stop ALL synths
+                            for (const synth_id of active_synths) {
+                                send_note_off_to_synth(synth_id)
+                            }
+                            voice_assignments.clear()
+                        } else {
+                            // Reallocate all notes
+                            reallocate_all_notes()
+                        }
+                    }
+                    break
+                }
+            }
+            
+            update_allocation_display()
+        }
+        
+        // Reallocate all notes (used when voice topology changes)
+        function reallocate_all_notes() {
+            const active_synths = Array.from(peers.entries())
+                .filter(([id, peer]) => peer.connection.connectionState === "connected")
+                .map(([id, peer]) => id)
+            
+            if (active_synths.length === 0 || held_notes.length === 0) {
+                // Clear all assignments
+                voice_assignments.clear()
+                return
+            }
+            
+            // Clear previous assignments
+            voice_assignments.clear()
+            
+            // Assign notes using modulo distribution
+            held_notes.forEach((held_note, index) => {
+                const synth_id = active_synths[index % active_synths.length]
+                send_note_to_synth(synth_id, held_note.note, held_note.velocity)
+                voice_assignments.set(synth_id, {
+                    current_note: held_note.note,
+                    stolen_from: null
+                })
+            })
+        }
+        
+        // Helper to send note to specific synth
+        function send_note_to_synth(synth_id, note, velocity) {
+            const peer = peers.get(synth_id)
+            if (peer && peer.command_channel && peer.command_channel.readyState === "open") {
+                peer.command_channel.send(JSON.stringify({
+                    type: "command",
+                    name: "play_note",
+                    value: {
+                        note: note,
+                        velocity: velocity
+                    }
+                }))
+            }
+        }
+        
+        // Helper to send note off to specific synth
+        function send_note_off_to_synth(synth_id) {
+            const peer = peers.get(synth_id)
+            if (peer && peer.command_channel && peer.command_channel.readyState === "open") {
+                peer.command_channel.send(JSON.stringify({
+                    type: "command",
+                    name: "note_off",
+                    value: true
+                }))
+            }
+        }
+        
+        // Update allocation display
+        function update_allocation_display() {
+            const stats_el = document.getElementById("stats")
+            if (stats_el) {
+                const active_synth_count = Array.from(peers.entries())
+                    .filter(([id, peer]) => peer.connection.connectionState === "connected").length
+                const notes_info = held_notes.length > 0 
+                    ? `Notes: ${held_notes.length} → ${active_synth_count} synths`
+                    : ""
+                document.getElementById("allocation_info").textContent = notes_info
+            }
+        }
+
+        // Helper function to send data to specific synth
+        function send_to_synth (synth_id, channel_type, param_name, value) {
+            const peer = peers.get(synth_id)
+            if (peer && peer.connection.connectionState === "connected") {
+                const channel = channel_type === 'param' ? peer.param_channel : peer.command_channel
+                if (channel && channel.readyState === "open") {
+                    channel.send(JSON.stringify({
+                        type: channel_type,
+                        name: param_name,
+                        value: value
+                    }))
+                }
+            }
+        }
+
+        // Initialize MIDI when page loads
+        if (navigator.requestMIDIAccess) {
+            init_midi ()
+        } else {
+            midi_devices_el.innerHTML = '<span style="color: red;">Web MIDI API not supported in this browser</span>'
+        }
+
         // start connection
         fetch_ice_servers ().then (() => {
             connect_websocket ()

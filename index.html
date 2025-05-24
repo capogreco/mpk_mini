@@ -84,17 +84,23 @@
     
     <div id="status">Disconnected</div>
     
-    <div id="controllers" style="margin-top: 20px;">
+    <div id="controllers" style="margin-top: 20px; display: none;">
         <h3>Connected Controllers</h3>
         <div id="controller_list" style="padding: 10px; background: #2a2a2a; border-radius: 4px;">None</div>
     </div>
     
     <div id="audio_hint">Click to enable audio engine</div>
-    <button id="start_audio">Start Audio</button>
+    <button id="start_audio">Enable Audio</button>
     
-    <canvas id="visualizer" class="dimmed"></canvas>
+    <canvas id="visualizer" class="dimmed" style="display: none;"></canvas>
     
-    <div id="params" class="dimmed">
+    <div id="calibration" style="margin-top: 20px; padding: 20px; background: #2a2a2a; border-radius: 8px; text-align: center; display: none;">
+        <h3 style="margin-bottom: 15px;">Calibration</h3>
+        <p style="margin-bottom: 20px; font-size: 1.1em;">Adjust the volume of your device until the noise is audible at a comfortable level</p>
+        <button id="join_instrument" style="padding: 10px 20px; font-size: 1.1em; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer;">Join Instrument</button>
+    </div>
+    
+    <div id="params" class="dimmed" style="display: none;">
         <div class="param">Volume: <span id="volume_display">0.2</span></div>
     </div>
 
@@ -108,6 +114,11 @@
         const controllers = new Map ()
         let stored_volume = 0.2  // store volume separately from gain
         let is_powered_on = true  // track power state
+        let is_calibrated = false  // track calibration state
+        let oscillator = null  // main oscillator (persistent)
+        let envelope_gain = null  // envelope gain node for note gating
+        let current_note = null  // currently playing note
+        let synth_ready = false  // track if synth graph is set up
         
         // webrtc configuration
         let rtc_config = {
@@ -132,10 +143,12 @@
         const volume_display = document.getElementById ("volume_display")
         const canvas = document.getElementById ("visualizer")
         const ctx = canvas.getContext ("2d")
+        const calibration_el = document.getElementById ("calibration")
+        const join_button = document.getElementById ("join_instrument")
+        const controllers_el = document.getElementById ("controllers")
+        const params_el = document.getElementById ("params")
         
-        // set canvas size
-        canvas.width = canvas.offsetWidth
-        canvas.height = canvas.offsetHeight
+
         
         // connect to websocket
         function connect_websocket () {
@@ -372,29 +385,37 @@
             // load audio worklet
             await audio_context.audioWorklet.addModule ("pink_noise.js")
             
-            // create nodes
+            // create nodes for calibration
             pink_noise = new AudioWorkletNode (audio_context, "ridge-rat-type2-pink-noise-generator")
             gain_node = audio_context.createGain ()
             analyser = audio_context.createAnalyser ()
             
-            // connect nodes
+            // connect calibration chain
             pink_noise.connect (gain_node)
             gain_node.connect (analyser)
             analyser.connect (audio_context.destination)
             
-            // set initial volume based on power state
-            gain_node.gain.value = is_powered_on ? stored_volume : 0
+            // set fixed volume for calibration (not affected by stored volume)
+            gain_node.gain.value = 0.2
             
             // set pink noise amplitude
             pink_noise.parameters.get ("amplitude").value = 0.2
             
-            start_button.textContent = "Audio Running"
-            start_button.disabled = true
+            // Create persistent synth graph (but don't connect yet)
+            setup_synth_graph ()
+            
+            // Hide enable audio UI
+            start_button.style.display = "none"
             document.getElementById ("audio_hint").style.display = "none"
             
-            // remove dimmed state from UI elements
-            document.getElementById ("visualizer").classList.remove ("dimmed")
-            document.getElementById ("params").classList.remove ("dimmed")
+            // Show calibration phase
+            calibration_el.style.display = "block"
+            canvas.style.display = "block"
+            canvas.classList.remove ("dimmed")
+            
+            // set canvas size after it's visible
+            canvas.width = canvas.offsetWidth
+            canvas.height = canvas.offsetHeight
             
             // start visualizer
             draw_visualizer ()
@@ -432,12 +453,35 @@
         function handle_data_message (data) {
             if (data.type === "param") {
                 console.log (`param ${data.name} = ${data.value}`)
+                
                 if (data.name === "volume") {
                     stored_volume = data.value
-                    volume_display.textContent = data.value.toFixed (2)
-                    if (gain_node && is_powered_on) {
+                    // Only update display if calibrated (to avoid confusion during calibration)
+                    if (is_calibrated) {
+                        volume_display.textContent = data.value.toFixed (2)
+                    }
+                    if (gain_node && is_powered_on && is_calibrated) {
                         gain_node.gain.value = data.value
                     }
+                    return  // Always accept volume updates for state
+                }
+                
+                // Only respond to other params if calibrated
+                if (!is_calibrated) return
+                
+                if (data.name.startsWith ("knob")) {
+                    // Handle knob controls (knob1-knob8)
+                    const knob_num = parseInt (data.name.substring (4))
+                    console.log (`Knob ${knob_num}: ${data.value}`)
+                    // TODO: Map knobs to synth parameters
+                } else if (data.name === "modulation") {
+                    // Handle modulation wheel
+                    console.log (`Modulation: ${data.value}`)
+                    // TODO: Apply modulation to synth
+                } else if (data.name === "pitch_bend") {
+                    // Handle pitch bend (-1 to 1)
+                    console.log (`Pitch bend: ${data.value}`)
+                    // TODO: Apply pitch bend to synth
                 }
             } else if (data.type === "ping") {
                 // find the controller that sent this ping
@@ -461,6 +505,9 @@
         // handle command updates
         function handle_command (command) {
             console.log (`command ${command.name} = ${command.value}`)
+            // Only respond to commands if calibrated
+            if (!is_calibrated) return
+            
             if (command.name === "power") {
                 is_powered_on = command.value
                 if (gain_node) {
@@ -472,7 +519,102 @@
                         gain_node.gain.value = 0
                     }
                 }
+            } else if (command.name === "play_note") {
+                // Play the assigned note
+                const note = command.value.note
+                const velocity = command.value.velocity
+                console.log (`Playing note: ${note} velocity: ${velocity}`)
+                play_note (note, velocity)
+            } else if (command.name === "note_off") {
+                // Stop playing
+                console.log ("Note off received")
+                stop_current_note ()
+            } else if (command.name.startsWith ("pad")) {
+                // Handle pad triggers (pad1-pad8)
+                const pad_num = parseInt (command.name.substring (3))
+                const velocity = command.value.velocity
+                console.log (`Pad ${pad_num} triggered, velocity: ${velocity}`)
+                // TODO: Handle pad trigger
             }
+        }
+        
+        // Convert MIDI note number to note name
+        function get_note_name (note_num) {
+            const notes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+            const octave = Math.floor (note_num / 12) - 1
+            const note = notes [note_num % 12]
+            return `${note}${octave}`
+        }
+        
+        // Convert MIDI note to frequency
+        function note_to_frequency (note) {
+            return 440 * Math.pow (2, (note - 69) / 12)
+        }
+        
+        // Setup persistent synthesis graph
+        function setup_synth_graph () {
+            if (!audio_context) return
+            
+            // Create persistent oscillator
+            oscillator = audio_context.createOscillator ()
+            oscillator.type = 'sine'
+            oscillator.frequency.value = 440  // Default frequency
+            
+            // Create envelope gain (for note on/off)
+            envelope_gain = audio_context.createGain ()
+            envelope_gain.gain.value = 0  // Start silent
+            
+            // Connect synthesis chain (but not to output yet)
+            oscillator.connect (envelope_gain)
+            // envelope_gain will connect to gain_node after calibration
+            
+            // Start oscillator - it runs forever
+            oscillator.start ()
+            
+            synth_ready = true
+        }
+        
+        // Stop currently playing note
+        function stop_current_note () {
+            if (!synth_ready || !envelope_gain) return
+            
+            const now = audio_context.currentTime
+            // Quick fade out to prevent click
+            envelope_gain.gain.cancelScheduledValues (now)
+            envelope_gain.gain.setValueAtTime (envelope_gain.gain.value, now)
+            envelope_gain.gain.linearRampToValueAtTime (0, now + 0.05) // 50ms fade out
+            
+            current_note = null
+        }
+        
+        // Play a note
+        function play_note (note, velocity) {
+            // Only play if we have audio context and are calibrated
+            if (!audio_context || !is_calibrated || !is_powered_on || !synth_ready) return
+            
+            // Update oscillator frequency
+            const now = audio_context.currentTime
+            oscillator.frequency.setValueAtTime (note_to_frequency (note), now)
+            
+            // Apply amplitude envelope
+            const target_gain = velocity
+            envelope_gain.gain.cancelScheduledValues (now)
+            envelope_gain.gain.setValueAtTime (envelope_gain.gain.value, now)
+            envelope_gain.gain.linearRampToValueAtTime (target_gain, now + 0.02) // 20ms attack
+            
+            current_note = note
+            
+            // Update display
+            const note_name = get_note_name (note)
+            const note_display = document.createElement ('div')
+            note_display.className = 'param'
+            note_display.innerHTML = `Playing: <span>${note_name}</span>`
+            const params_el = document.getElementById ('params')
+            if (params_el.querySelector ('.note-display')) {
+                params_el.querySelector ('.note-display').remove ()
+            }
+            note_display.classList.add ('note-display')
+            params_el.appendChild (note_display)
         }
         
         // update controller list display
@@ -491,6 +633,44 @@
         
         // start audio on user gesture
         start_button.addEventListener ("click", init_audio)
+        
+        // join instrument after calibration
+        join_button.addEventListener ("click", () => {
+            is_calibrated = true
+            
+            // Disconnect pink noise
+            if (pink_noise) {
+                pink_noise.disconnect ()
+                pink_noise = null
+            }
+            
+            // Connect synth graph to main output chain
+            if (synth_ready && envelope_gain) {
+                envelope_gain.connect (gain_node)
+                // Now apply the actual stored volume (not calibration volume)
+                gain_node.gain.value = is_powered_on ? stored_volume : 0
+            }
+            
+            // Hide calibration UI and visualizer
+            calibration_el.style.display = "none"
+            canvas.style.display = "none"
+            
+            // Show instrument UI
+            controllers_el.style.display = "block"
+            params_el.style.display = "block"
+            params_el.classList.remove ("dimmed")
+            
+            // Request current state from controllers (with small delay to ensure UI is ready)
+            setTimeout(() => {
+                for (const [ctrl_id, ctrl] of controllers) {
+                    if (ctrl.channel && ctrl.channel.readyState === "open") {
+                        ctrl.channel.send (JSON.stringify ({
+                            type: "request_state"
+                        }))
+                    }
+                }
+            }, 100)
+        })
         
         // start connection
         fetch_ice_servers ().then (() => {
